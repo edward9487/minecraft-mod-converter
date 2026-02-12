@@ -1510,15 +1510,15 @@ export default function Home() {
 
       <main className="mx-auto mt-14 grid max-w-6xl gap-6 px-6 lg:grid-cols-[1.35fr_0.65fr]">
         <section className="space-y-6">
-          <div className="relative z-30 grid gap-6 rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember animate-fade-up">
-            <div className="flex flex-col gap-2">
-              <h2 className="text-xl font-semibold">模組清單輸入</h2>
-              <p className="text-sm text-[color:var(--muted)]">
-                搜尋 Modrinth 模組或上傳清單匯入，僅收集 Project ID。
-              </p>
-            </div>
-            <div className="grid gap-4 lg:grid-cols-[1.6fr_0.4fr] overflow-visible">
+          <div className="relative z-30 rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember animate-fade-up">
+            <div className="grid gap-4 lg:grid-cols-[1fr_180px] overflow-visible">
               <div className="flex flex-col gap-6">
+                <div className="flex flex-col gap-2">
+                  <h2 className="text-xl font-semibold">模組清單輸入</h2>
+                  <p className="text-sm text-[color:var(--muted)]">
+                    搜尋 Modrinth 模組或上傳清單匯入，僅收集 Project ID。
+                  </p>
+                </div>
                 <div className="flex flex-col gap-3">
                   <label className="text-xs text-[color:var(--muted)]">
                     搜尋或貼上連結
@@ -1621,32 +1621,33 @@ export default function Home() {
                     )}
                   </div>
                 </div>
+              </div>
+              <div className="flex flex-col gap-4 mt-[18px]">
                 <div className="flex items-center justify-between rounded-2xl border border-[color:var(--line)] bg-[color:var(--bg)] px-4 py-3">
-                  <div>
-                    <p className="text-sm font-medium">自訂模組</p>
-                    <p className="text-xs text-[color:var(--muted)]">
-                      可填用途說明與外部連結，當作記事本使用。
-                    </p>
+                  <div className="flex-1 flex items-center">
+                    <p className="text-sm font-medium">下載清單</p>
                   </div>
                   <button
-                    className="h-10 rounded-full border border-[color:var(--line)] px-4 text-xs font-semibold text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700"
+                    className="h-10 rounded-full border border-[color:var(--line)] px-4 text-xs font-semibold text-[color:var(--muted)] disabled:opacity-50 flex-shrink-0 ml-2"
+                    type="button"
+                    onClick={handleDownloadSelected}
+                    disabled={selectedMods.size === 0}
+                  >
+                    下載清單
+                  </button>
+                </div>
+                <div className="flex items-center justify-between rounded-2xl border border-[color:var(--line)] bg-[color:var(--bg)] px-4 py-3">
+                  <div className="flex-1 flex items-center">
+                    <p className="text-sm font-medium">自訂模組</p>
+                  </div>
+                  <button
+                    className="h-10 rounded-full border border-[color:var(--line)] px-3 text-xs font-semibold text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700 flex-shrink-0 ml-2"
                     type="button"
                     onClick={handleAddCustomItem}
                   >
-                    新增自訂模組
+                    新增
                   </button>
                 </div>
-              </div>
-              <div className="rounded-2xl border border-dashed border-[color:var(--line)] bg-[color:var(--bg)] px-4 py-5 text-center">
-                <p className="text-xs text-[color:var(--muted)]">或下載</p>
-                <button
-                  className="mt-3 inline-flex h-10 items-center justify-center rounded-full border border-[color:var(--line)] px-4 text-xs font-semibold text-[color:var(--muted)] disabled:opacity-50"
-                  type="button"
-                  onClick={handleDownloadSelected}
-                  disabled={selectedMods.size === 0}
-                >
-                  下載清單
-                </button>
               </div>
             </div>
           </div>
