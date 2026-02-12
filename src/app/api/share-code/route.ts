@@ -49,8 +49,12 @@ function computeHash(payload: { targetVersion: string; loader: string; items: un
     loader: payload.loader,
     items: payload.items.map((item: any) => ({
       id: item.id,
+      title: item.title,
       isDependency: item.isDependency,
       isSelected: item.isSelected,
+      note: typeof item.note === "string" ? item.note : "",
+      isCustom: Boolean(item.isCustom),
+      customUrl: typeof item.customUrl === "string" ? item.customUrl : "",
     })),
   });
   return createHash("sha256").update(normalized).digest("hex");
@@ -89,16 +93,23 @@ export async function POST(request: NextRequest) {
     const store = await readStore();
     const requestedCode = body.code?.toUpperCase();
 
+    // 檢查現有代碼的內容是否改變
     if (requestedCode && store[requestedCode]) {
-      store[requestedCode] = {
-        targetVersion: body.targetVersion,
-        loader: body.loader,
-        items: body.items,
-        contentHash,
-        savedAt: new Date().toISOString(),
-      };
-      await writeStore(store);
-      return NextResponse.json({ code: requestedCode, updated: true });
+      if (store[requestedCode].contentHash === contentHash) {
+        // 內容未改變，保持原代碼
+        return NextResponse.json({ code: requestedCode, updated: false });
+      } else {
+        // 內容已改變，覆蓋該代碼
+        store[requestedCode] = {
+          targetVersion: body.targetVersion,
+          loader: body.loader,
+          items: body.items,
+          contentHash,
+          savedAt: new Date().toISOString(),
+        };
+        await writeStore(store);
+        return NextResponse.json({ code: requestedCode, updated: true });
+      }
     }
 
     // 查詢已有相同內容的代碼

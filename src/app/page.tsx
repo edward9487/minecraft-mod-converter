@@ -27,6 +27,9 @@ type CartItem = {
   dependencies?: DependencyItem[];
   isDependency?: boolean;
   isSelected?: boolean;
+  note?: string;
+  isCustom?: boolean;
+  customUrl?: string;
 };
 
 type GameVersionTag = {
@@ -117,6 +120,37 @@ function normalizeDependencies(value: unknown): DependencyItem[] {
   return (value as DependencyItem[]).filter(
     (item) => item && typeof item.id === "string"
   );
+}
+
+function generateLocalId() {
+  return `custom-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+}
+
+async function computeContentHash(
+  targetVersion: string,
+  loader: string,
+  items: CartItem[],
+  selectedMods: Set<string>
+): Promise<string> {
+  const normalized = JSON.stringify({
+    targetVersion,
+    loader,
+    items: items.map((item) => ({
+      id: item.id,
+      title: item.title,
+      isDependency: item.isDependency,
+      isSelected: selectedMods.has(item.id),
+      note: typeof item.note === "string" ? item.note : "",
+      isCustom: Boolean(item.isCustom),
+      customUrl: typeof item.customUrl === "string" ? item.customUrl : "",
+    })),
+  });
+  
+  const encoder = new TextEncoder();
+  const data = encoder.encode(normalized);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function compareVersions(a: string, b: string) {
@@ -269,6 +303,7 @@ export default function Home() {
   const [modalData, setModalData] = useState<{ code?: string; count?: number } | null>(null);
   const [pendingAction, setPendingAction] = useState<string>("");
   const [currentShareCode, setCurrentShareCode] = useState<string | null>(null);
+  const [currentShareCodeHash, setCurrentShareCodeHash] = useState<string | null>(null);
 
   const statusStyles: Record<StatusTone, string> = {
     success: "bg-emerald-100 text-emerald-800 border-emerald-200",
@@ -390,6 +425,9 @@ export default function Home() {
           paused: false,
           downloaded: false,
           isDependency: false,
+          note: "",
+          isCustom: false,
+          customUrl: "",
         }));
       if (newItems.length) {
         setCartItems(newItems);
@@ -438,6 +476,9 @@ export default function Home() {
           iconUrl,
           dependencies: [],
           isDependency: false,
+          note: "",
+          isCustom: false,
+          customUrl: "",
         },
         ...items,
       ]);
@@ -450,8 +491,44 @@ export default function Home() {
     }
   };
 
+  const handleAddCustomItem = () => {
+    const id = generateLocalId();
+    setCartItems((items) => [
+      {
+        id,
+        title: "自訂模組",
+        source: "自訂",
+        currentVersion: "-",
+        targetVersion,
+        status: "自訂",
+        statusTone: "accent" as StatusTone,
+        paused: false,
+        downloaded: false,
+        filename: undefined,
+        iconUrl: undefined,
+        dependencies: [],
+        isDependency: false,
+        note: "",
+        isCustom: true,
+        customUrl: "",
+      },
+      ...items,
+    ]);
+    setNotice("已新增自訂模組，可編輯名稱與連結。");
+  };
+
   const resolveItem = async (item: CartItem): Promise<CartItem> => {
     if (item.paused) return item;
+    if (item.isCustom || item.source === "自訂") {
+      return {
+        ...item,
+        status: "自訂",
+        statusTone: "accent" as StatusTone,
+        targetVersion: "-",
+        currentVersion: "-",
+        filename: undefined,
+      };
+    }
 
     const projectInfo = await fetchProjectInfoById(item.id);
     const baseItem = {
@@ -546,13 +623,22 @@ export default function Home() {
 
     try {
       const resolved = await runPool(cartItems, 10, resolveItem);
-      const existingIds = new Set(resolved.map((item) => item.id));
+      const existingIds = new Set(cartItems.map((item) => item.id));
       const dependencyItems: CartItem[] = [];
       const dependencyIds = new Set<string>();
+      const dependencySelectionMap = new Map<string, boolean>();
 
       resolved.forEach((item) => {
         item.dependencies?.forEach((dep) => {
           if (existingIds.has(dep.id) || dependencyIds.has(dep.id)) return;
+          
+          const isCurrentSelected = selectedMods.has(item.id);
+          if (dependencySelectionMap.has(dep.id)) {
+            dependencySelectionMap.set(dep.id, dependencySelectionMap.get(dep.id) || isCurrentSelected);
+          } else {
+            dependencySelectionMap.set(dep.id, isCurrentSelected);
+          }
+          
           dependencyIds.add(dep.id);
           dependencyItems.push({
             id: dep.id,
@@ -568,6 +654,9 @@ export default function Home() {
             iconUrl: dep.iconUrl,
             dependencies: [],
             isDependency: true,
+            note: "",
+            isCustom: false,
+            customUrl: "",
           });
         });
       });
@@ -579,6 +668,15 @@ export default function Home() {
           downloaded: false,
         }));
         setCartItems(resetItems);
+        
+        const updatedSelectedMods = new Set(selectedMods);
+        dependencySelectionMap.forEach((shouldSelect, depId) => {
+          if (shouldSelect) {
+            updatedSelectedMods.add(depId);
+          }
+        });
+        setSelectedMods(updatedSelectedMods);
+        
         setNotice(
           `完成解析，${targetVersion}（${loader}），已加入 ${dependencyItems.length} 個前置模組。`
         );
@@ -616,6 +714,16 @@ export default function Home() {
   const executeGenerateCode = async () => {
     setIsGeneratingCode(true);
     try {
+      const loaderId = toLoaderId(loader);
+    const currentHash = await computeContentHash(targetVersion, loaderId, cartItems, selectedMods);
+      
+    if (currentShareCode && currentShareCodeHash === currentHash) {
+      const shareLink = `${window.location.origin}/?s=${encodeURIComponent(currentShareCode)}`;
+      setNotice(`無異動，保持現有分享連結：${shareLink}`);
+      setIsGeneratingCode(false);
+      return;
+    }
+      
       const payload = {
         code: currentShareCode ?? undefined,
         targetVersion,
@@ -635,6 +743,9 @@ export default function Home() {
           dependencies: item.dependencies,
           isDependency: item.isDependency,
           isSelected: selectedMods.has(item.id),
+          note: item.note ?? "",
+          isCustom: item.isCustom ?? false,
+          customUrl: item.customUrl ?? "",
         })),
       };
 
@@ -668,6 +779,7 @@ export default function Home() {
       if (data.code) {
         const wasUpdated = Boolean(data.updated);
         setCurrentShareCode(data.code);
+        setCurrentShareCodeHash(currentHash);
         const shareLink = typeof window !== "undefined"
           ? `${window.location.origin}/?s=${encodeURIComponent(data.code)}`
           : data.code;
@@ -730,6 +842,9 @@ export default function Home() {
         dependencies: normalizeDependencies(item.dependencies),
         isDependency: item.isDependency ?? false,
         isSelected: item.isSelected ?? false,
+        note: typeof item.note === "string" ? item.note : "",
+        isCustom: Boolean(item.isCustom),
+        customUrl: typeof item.customUrl === "string" ? item.customUrl : "",
       }));
       if (data.targetVersion) setTargetVersion(data.targetVersion);
       if (data.loader) {
@@ -742,6 +857,16 @@ export default function Home() {
         .map((item) => item.id);
       setSelectedMods(new Set(selectedIds));
       setCurrentShareCode(code.toUpperCase());
+      
+      const loaderId = data.loader || toLoaderId(loader);
+      const codeHash = await computeContentHash(
+        data.targetVersion || targetVersion,
+        loaderId,
+        normalized,
+        new Set(selectedIds)
+      );
+      setCurrentShareCodeHash(codeHash);
+      
       setShowSearch(false);
       setNotice(`已載入代碼清單，共 ${normalized.length} 筆。`);
     } catch (error) {
@@ -749,8 +874,14 @@ export default function Home() {
     }
   };
 
-  const handleOpenProject = (id: string) => {
-    const url = `https://modrinth.com/mod/${encodeURIComponent(id)}`;
+  const handleOpenProject = (item: CartItem) => {
+    const url = item.isCustom
+      ? item.customUrl?.trim()
+      : `https://modrinth.com/mod/${encodeURIComponent(item.id)}`;
+    if (!url) {
+      setNotice("此自訂模組尚未填寫連結。");
+      return;
+    }
     window.open(url, "_blank", "noopener,noreferrer");
   };
 
@@ -917,6 +1048,9 @@ export default function Home() {
         iconUrl: result.icon_url,
         dependencies: [],
         isDependency: false,
+        note: "",
+        isCustom: false,
+        customUrl: "",
       },
       ...items,
     ]);
@@ -990,6 +1124,9 @@ export default function Home() {
         iconUrl: item.iconUrl,
         dependencies: normalizeDependencies(item.dependencies),
         isDependency: item.isDependency ?? false,
+        note: typeof item.note === "string" ? item.note : "",
+        isCustom: Boolean(item.isCustom),
+        customUrl: typeof item.customUrl === "string" ? item.customUrl : "",
       }));
       setCartItems(normalized);
       setNotice(`已匯入 ${normalized.length} 筆清單。`);
@@ -1016,6 +1153,30 @@ export default function Home() {
               statusTone: "accent",
             }
           : item
+      )
+    );
+  };
+
+  const handleNoteChange = (id: string, value: string) => {
+    setCartItems((items) =>
+      items.map((item) =>
+        item.id === id ? { ...item, note: value } : item
+      )
+    );
+  };
+
+  const handleCustomTitleChange = (id: string, value: string) => {
+    setCartItems((items) =>
+      items.map((item) =>
+        item.id === id ? { ...item, title: value } : item
+      )
+    );
+  };
+
+  const handleCustomUrlChange = (id: string, value: string) => {
+    setCartItems((items) =>
+      items.map((item) =>
+        item.id === id ? { ...item, customUrl: value } : item
       )
     );
   };
@@ -1184,6 +1345,21 @@ export default function Home() {
                     )}
                   </div>
                 </div>
+                <div className="flex items-center justify-between rounded-2xl border border-[color:var(--line)] bg-[color:var(--bg)] px-4 py-3">
+                  <div>
+                    <p className="text-sm font-medium">自訂模組</p>
+                    <p className="text-xs text-[color:var(--muted)]">
+                      可填用途說明與外部連結，當作記事本使用。
+                    </p>
+                  </div>
+                  <button
+                    className="h-10 rounded-full border border-[color:var(--line)] px-4 text-xs font-semibold text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700"
+                    type="button"
+                    onClick={handleAddCustomItem}
+                  >
+                    新增自訂模組
+                  </button>
+                </div>
               </div>
               <div className="rounded-2xl border border-dashed border-[color:var(--line)] bg-[color:var(--bg)] px-4 py-5 text-center">
                 <p className="text-xs text-[color:var(--muted)]">或下載</p>
@@ -1251,17 +1427,51 @@ export default function Home() {
                         </div>
                       )}
                       <div className="flex-1">
-                        <p className="text-sm font-semibold">{item.title}</p>
+                        {item.isCustom ? (
+                          <div className="grid gap-2">
+                            <input
+                              className="h-9 rounded-xl border border-[color:var(--line)] bg-white/90 px-3 text-xs text-[color:var(--ink)] focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20"
+                              placeholder="自訂模組名稱"
+                              value={item.title}
+                              onChange={(event) => handleCustomTitleChange(item.id, event.target.value)}
+                            />
+                            <input
+                              className="h-9 rounded-xl border border-[color:var(--line)] bg-white/90 px-3 text-xs text-[color:var(--ink)] focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20"
+                              placeholder="相關連結（選填）"
+                              value={item.customUrl ?? ""}
+                              onChange={(event) => handleCustomUrlChange(item.id, event.target.value)}
+                            />
+                          </div>
+                        ) : (
+                          <p className="text-sm font-semibold">{item.title}</p>
+                        )}
                         {item.filename && item.status === "可更新" && (
                           <p className="text-xs text-emerald-700 mt-1">
                             📦 {item.filename}
                           </p>
                         )}
+                        {item.isCustom && item.customUrl ? (
+                          <p className="text-xs text-blue-600 mt-1 break-all">
+                            連結：{item.customUrl}
+                          </p>
+                        ) : null}
                         {item.dependencies && item.dependencies.length > 0 && (
                           <p className="text-xs text-blue-600 mt-1">
                             前置：{item.dependencies.map((dep) => dep.title).join(", ")}
                           </p>
                         )}
+                        <div className="mt-2">
+                          <label className="text-[11px] text-[color:var(--muted)]">
+                            模組用途說明
+                          </label>
+                          <textarea
+                            className="mt-1 w-full rounded-xl border border-[color:var(--line)] bg-white/90 px-3 py-2 text-xs text-[color:var(--ink)] focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20"
+                            rows={2}
+                            placeholder="例如：效能優化、必備前置、材質依賴..."
+                            value={item.note ?? ""}
+                            onChange={(event) => handleNoteChange(item.id, event.target.value)}
+                          />
+                        </div>
                         <p className="text-xs text-[color:var(--muted)]">
                           {item.source}
                         </p>
@@ -1287,21 +1497,21 @@ export default function Home() {
                     <button
                       className="rounded-full border border-[color:var(--line)] px-3 py-1 text-xs font-semibold text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700"
                       type="button"
-                      onClick={() => handleOpenProject(item.id)}
+                      onClick={() => handleOpenProject(item)}
                     >
-                      Modrinth
+                      {item.isCustom ? "連結" : "Modrinth"}
                     </button>
                     <button
                       className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
                         item.downloaded
                           ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                          : item.status === "可更新"
+                          : item.status === "可更新" && !item.isCustom
                           ? "border-orange-200 text-orange-700 hover:bg-orange-50"
                           : "border-[color:var(--line)] text-[color:var(--muted)] cursor-not-allowed opacity-50"
                       }`}
                       type="button"
                       onClick={() => handleDownload(item)}
-                      disabled={(item.status !== "可更新" && !item.downloaded) || downloadingId === item.id}
+                      disabled={(item.status !== "可更新" && !item.downloaded) || downloadingId === item.id || item.isCustom}
                     >
                       {downloadingId === item.id ? "下載中..." : item.downloaded ? "已下載" : "下載"}
                     </button>
