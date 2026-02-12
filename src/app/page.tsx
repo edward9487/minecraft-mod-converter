@@ -541,7 +541,7 @@ export default function Home() {
         title: "自訂模組",
         source: "自訂",
         currentVersion: "-",
-        targetVersion,
+        targetVersion: "",
         status: "自訂",
         statusTone: "accent" as StatusTone,
         paused: false,
@@ -1572,7 +1572,7 @@ export default function Home() {
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-xl font-semibold">
-                  模組清單（{activeCount} / {cartItems.length}）
+                  模組清單（{selectedMods.size} / {cartItems.length}）
                 </h2>
                 <p className="text-sm text-[color:var(--muted)]">
                   依狀態分類，缺失項目需手動處理才能匯出。
@@ -1584,7 +1584,7 @@ export default function Home() {
               {visibleItems.map((item) => (
                 <div
                   key={item.id}
-                  className={`flex flex-col gap-4 rounded-2xl border px-4 py-4 sm:flex-row sm:items-center sm:justify-between transition ${
+                  className={`grid grid-cols-1 lg:grid-cols-[1fr_240px] gap-4 rounded-2xl border px-4 py-4 transition ${
                     item.isDependency
                       ? selectedMods.has(item.id)
                         ? "border-slate-400 bg-slate-300"
@@ -1599,9 +1599,9 @@ export default function Home() {
                       type="checkbox"
                       checked={selectedMods.has(item.id)}
                       onChange={() => handleToggleSelection(item.id)}
-                      className="mt-1 w-5 h-5 rounded border-[color:var(--line)] cursor-pointer"
+                      className="mt-1 w-5 h-5 rounded border-[color:var(--line)] cursor-pointer flex-shrink-0"
                     />
-                    <div className="flex items-start gap-3 flex-1">
+                    <div className="flex items-start gap-3 flex-1 min-w-0">
                       {item.iconUrl ? (
                         <img
                           src={item.iconUrl}
@@ -1619,7 +1619,7 @@ export default function Home() {
                           {item.title.slice(0, 2)}
                         </div>
                       )}
-                      <div className="flex-1">
+                      <div className="flex-1 min-w-0">
                         {item.isCustom ? (
                           <div className="grid gap-2">
                             <input
@@ -1636,20 +1636,20 @@ export default function Home() {
                             />
                           </div>
                         ) : (
-                          <p className="text-sm font-semibold">{item.title}</p>
+                          <p className="text-sm font-semibold truncate">{item.title}</p>
                         )}
                         {item.filename && item.status === "可更新" && (
-                          <p className="text-xs text-emerald-700 mt-1">
+                          <p className="text-xs text-emerald-700 mt-1 truncate">
                             📦 {item.filename}
                           </p>
                         )}
                         {item.isCustom && item.customUrl ? (
-                          <p className="text-xs text-blue-600 mt-1 break-all">
+                          <p className="text-xs text-blue-600 mt-1 truncate">
                             連結：{item.customUrl}
                           </p>
                         ) : null}
                         {item.dependencies && item.dependencies.length > 0 && (
-                          <p className="text-xs text-blue-600 mt-1">
+                          <p className="text-xs text-blue-600 mt-1 truncate">
                             前置：{item.dependencies.map((dep) => dep.title).join(", ")}
                           </p>
                         )}
@@ -1665,87 +1665,92 @@ export default function Home() {
                             onChange={(event) => handleNoteChange(item.id, event.target.value)}
                           />
                         </div>
-                        <p className="text-xs text-[color:var(--muted)]">
-                          {item.source}
-                        </p>
                       </div>
                     </div>
                   </div>
-                  <div className="flex flex-wrap items-center gap-3">
-                    <span
-                      className={`rounded-full border px-3 py-1 text-xs font-semibold ${
-                        statusStyles[item.statusTone]
-                      }`}
-                    >
-                      {item.status}
-                    </span>
-                    <span className="text-xs text-[color:var(--muted)]">
-                      目標：{item.targetVersion}
-                    </span>
-                    {item.lastSupportedVersion ? (
-                      <span className="text-xs text-amber-700">
+                  <div className="flex flex-col gap-2">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`inline-block rounded-full border px-3 py-1 text-xs font-semibold whitespace-nowrap min-w-[60px] text-center ${
+                          statusStyles[item.statusTone]
+                        }`}
+                      >
+                        {item.status}
+                      </span>
+                      {item.isCustom ? (
+                        <div className="flex items-center gap-1 flex-1 min-w-0">
+                          <span className="text-xs text-[color:var(--muted)] whitespace-nowrap">目標：</span>
+                          <input
+                            className="flex-1 h-9 rounded-full border border-[color:var(--line)] bg-white/90 px-3 text-xs text-[color:var(--ink)] focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20 min-w-0"
+                            placeholder="版本"
+                            value={item.targetVersion}
+                            onChange={(event) => {
+                              setCartItems((items) =>
+                                items.map((entry) =>
+                                  entry.id === item.id ? { ...entry, targetVersion: event.target.value } : entry
+                                )
+                              );
+                            }}
+                          />
+                        </div>
+                      ) : (
+                        <span className="text-xs text-[color:var(--muted)] truncate flex-1 min-w-0">
+                          目標：{item.targetVersion}
+                        </span>
+                      )}
+                    </div>
+                    {item.lastSupportedVersion && !item.isCustom ? (
+                      <span className="text-xs text-amber-700 truncate">
                         最後支援：{item.lastSupportedVersion}
                       </span>
                     ) : null}
+                    {item.isCustom ? (
+                      <button
+                        className="w-full h-9 rounded-full border border-[color:var(--line)] text-xs font-semibold text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700 transition truncate"
+                        type="button"
+                        onClick={() => handleOpenProject(item)}
+                        title="開啟連結"
+                      >
+                        連結
+                      </button>
+                    ) : (
+                      <div className="flex gap-2">
+                        <button
+                          className="flex-1 h-9 rounded-full border border-[color:var(--line)] text-xs font-semibold text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700 transition truncate"
+                          type="button"
+                          onClick={() => handleOpenProject(item)}
+                          title="開啟 Modrinth"
+                        >
+                          Modrinth
+                        </button>
+                        <button
+                          className={`flex-1 h-9 rounded-full border text-xs font-semibold transition truncate ${
+                            item.downloaded
+                              ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+                              : item.status === "可更新"
+                              ? "border-orange-200 text-orange-700 hover:bg-orange-50"
+                              : "border-[color:var(--line)] text-[color:var(--muted)] cursor-not-allowed opacity-50"
+                          }`}
+                          type="button"
+                          onClick={() => handleDownload(item)}
+                          disabled={(item.status !== "可更新" && !item.downloaded) || downloadingId === item.id}
+                          title={downloadingId === item.id ? "下載中..." : item.downloaded ? "已下載" : "下載模組"}
+                        >
+                          {downloadingId === item.id ? "下載中..." : item.downloaded ? "已下載" : "下載"}
+                        </button>
+                      </div>
+                    )}
                     <button
-                      className="rounded-full border border-[color:var(--line)] px-3 py-1 text-xs font-semibold text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700"
-                      type="button"
-                      onClick={() => handleOpenProject(item)}
-                    >
-                      {item.isCustom ? "連結" : "Modrinth"}
-                    </button>
-                    <button
-                      className={`rounded-full border px-3 py-1 text-xs font-semibold transition ${
-                        item.downloaded
-                          ? "border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
-                          : item.status === "可更新" && !item.isCustom
-                          ? "border-orange-200 text-orange-700 hover:bg-orange-50"
-                          : "border-[color:var(--line)] text-[color:var(--muted)] cursor-not-allowed opacity-50"
-                      }`}
-                      type="button"
-                      onClick={() => handleDownload(item)}
-                      disabled={(item.status !== "可更新" && !item.downloaded) || downloadingId === item.id || item.isCustom}
-                    >
-                      {downloadingId === item.id ? "下載中..." : item.downloaded ? "已下載" : "下載"}
-                    </button>
-                    <button
-                      className="rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 hover:bg-rose-50"
+                      className="w-full h-9 rounded-full border border-rose-200 text-xs font-semibold text-rose-700 hover:bg-rose-50 transition"
                       type="button"
                       onClick={() => handleRemove(item.id)}
+                      title="刪除此模組"
                     >
                       刪除
                     </button>
                   </div>
                 </div>
               ))}
-            </div>
-          </div>
-
-          <div className="grid gap-4 rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember animate-fade-up">
-            <div className="flex flex-col gap-2">
-              <h2 className="text-xl font-semibold">解析進度</h2>
-              <p className="text-sm text-[color:var(--muted)]">
-                解析同時控制 10 筆並發，200 筆仍可順暢操作。
-              </p>
-            </div>
-            <div className="space-y-4">
-              <div className="flex items-center justify-between text-sm font-semibold">
-                <span>解析進度 {resolvedCount} / {activeCount}</span>
-                <span className="text-xs text-[color:var(--muted)]">
-                  {isResolving ? "解析中..." : "已完成"}
-                </span>
-              </div>
-              <div className="grid gap-2 text-xs sm:grid-cols-3">
-                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-3 text-emerald-700">
-                  ✓ 可更新 {stats.success}
-                </div>
-                <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-3 text-amber-700">
-                  ⚠ 缺失 {stats.warning}
-                </div>
-                <div className="rounded-2xl border border-rose-200 bg-rose-50 px-3 py-3 text-rose-700">
-                  ✕ 衝突 {stats.danger}
-                </div>
-              </div>
             </div>
           </div>
         </section>
