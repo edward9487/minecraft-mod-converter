@@ -30,6 +30,7 @@ type CartItem = {
   note?: string;
   isCustom?: boolean;
   customUrl?: string;
+  supportedLoaders?: string[];
 };
 
 type GameVersionTag = {
@@ -553,6 +554,7 @@ export default function Home() {
         note: "",
         isCustom: true,
         customUrl: "",
+        supportedLoaders: [],
       },
       ...items,
     ]);
@@ -569,6 +571,7 @@ export default function Home() {
         targetVersion: "-",
         currentVersion: "-",
         filename: undefined,
+        supportedLoaders: [],
       };
     }
 
@@ -593,6 +596,31 @@ export default function Home() {
       )}&loader=${encodeURIComponent(loaderId)}`
     );
 
+    // 檢測此版本支持的所有 Loader
+    const supportedLoaders: string[] = [];
+    const loaderLabel = (id: string) => loaderLabelMap[id] || id;
+    
+    for (const loaderKey of Object.keys(loaderLabelMap)) {
+      try {
+        const checkResponse = await fetch(
+          `/api/modrinth?type=versions&projectId=${encodeURIComponent(
+            item.id
+          )}&gameVersion=${encodeURIComponent(
+            targetVersion
+          )}&loader=${encodeURIComponent(loaderKey)}`,
+          { signal: AbortSignal.timeout(5000) }
+        );
+        if (checkResponse.ok) {
+          const versions = (await checkResponse.json()) as VersionInfo[];
+          if (versions.length > 0) {
+            supportedLoaders.push(loaderLabel(loaderKey));
+          }
+        }
+      } catch (error) {
+        // 靜默忽略超時或其他錯誤
+      }
+    }
+
     if (response.ok) {
       const versions = (await response.json()) as VersionInfo[];
       if (versions.length) {
@@ -608,6 +636,7 @@ export default function Home() {
           lastSupportedVersion: undefined,
           filename,
           dependencies,
+          supportedLoaders,
         };
       }
     }
@@ -631,6 +660,7 @@ export default function Home() {
         lastSupportedVersion: lastSupported,
         filename: undefined,
         dependencies,
+        supportedLoaders,
       };
     }
 
@@ -640,6 +670,7 @@ export default function Home() {
       status: "缺失",
       statusTone: "warning" as StatusTone,
       filename: undefined,
+      supportedLoaders,
     };
   };
 
@@ -921,6 +952,7 @@ export default function Home() {
         note: item.note ?? "",
         isCustom: item.isCustom ?? false,
         customUrl: item.customUrl ?? "",
+        supportedLoaders: Array.isArray(item.supportedLoaders) ? item.supportedLoaders : [],
       }));
       if (data.targetVersion) setTargetVersion(data.targetVersion);
       if (data.loader) {
@@ -1294,6 +1326,7 @@ export default function Home() {
         note: typeof item.note === "string" ? item.note : "",
         isCustom: Boolean(item.isCustom),
         customUrl: typeof item.customUrl === "string" ? item.customUrl : "",
+        supportedLoaders: Array.isArray(item.supportedLoaders) ? item.supportedLoaders : [],
       }));
       setCartItems(normalized);
       setNotice(`已匯入 ${normalized.length} 筆清單。`);
@@ -1651,6 +1684,11 @@ export default function Home() {
                         {item.dependencies && item.dependencies.length > 0 && (
                           <p className="text-xs text-blue-600 mt-1 truncate">
                             前置：{item.dependencies.map((dep) => dep.title).join(", ")}
+                          </p>
+                        )}
+                        {item.supportedLoaders && item.supportedLoaders.length > 0 && (
+                          <p className="text-xs text-purple-600 mt-1 truncate">
+                            支援：{item.supportedLoaders.join(", ")}
                           </p>
                         )}
                         <div className="mt-2">
