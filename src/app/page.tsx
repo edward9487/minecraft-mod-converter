@@ -1731,7 +1731,7 @@ export default function Home() {
                           </p>
                         )}
                         {item.supportedLoaders && item.supportedLoaders.length > 0 && (
-                          <p className="text-xs text-purple-600 mt-1 truncate">
+                          <p className="text-xs text-purple-600 mt-1 whitespace-normal break-words overflow-hidden [display:-webkit-box] [-webkit-line-clamp:2] [-webkit-box-orient:vertical]">
                             支援：
                             {item.supportedLoaders
                               .map((entry) =>
