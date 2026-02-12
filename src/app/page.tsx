@@ -642,7 +642,7 @@ export default function Home() {
     }
 
     const fallbackResponse = await fetch(
-      `/api/modrinth?type=versions&projectId=${encodeURIComponent(item.id)}`
+      `/api/modrinth?type=versions&projectId=${encodeURIComponent(item.id)}&loader=${encodeURIComponent(loaderId)}`
     );
     if (fallbackResponse.ok) {
       const versions = (await fallbackResponse.json()) as VersionInfo[];
