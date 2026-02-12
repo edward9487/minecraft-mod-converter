@@ -775,24 +775,38 @@ export default function Home() {
         if (typeof window !== "undefined") {
           window.history.replaceState(null, "", `/?s=${encodeURIComponent(data.code)}`);
         }
+        
+        let copySuccess = false;
         try {
           await navigator.clipboard.writeText(shareLink);
-          if (wasUpdated) {
-            setModalType("success");
-            setModalTitle("已更新");
-            setModalMessage(`分享連結已更新並複製：${shareLink}`);
-            setModalData(null);
-          } else {
-            setModalType("success");
-            setModalTitle("無異動");
-            setModalMessage(`內容未改變，保持原分享連結：${shareLink}`);
-            setModalData(null);
-          }
+          copySuccess = true;
         } catch (error) {
-          const msg = wasUpdated
-            ? `已更新分享連結：${shareLink}`
-            : `內容無異動，保持原分享連結：${shareLink}`;
-          setNotice(msg);
+          console.error("複製失敗:", error);
+        }
+        
+        // 無論複製成功或失敗，都顯示對話框
+        if (wasUpdated) {
+          setModalType("success");
+          setModalTitle("已更新");
+          setModalMessage(
+            copySuccess
+              ? `分享連結已更新並複製：${shareLink}`
+              : `分享連結已更新（複製失敗，請手動複製）：${shareLink}`
+          );
+          setModalData(null);
+        } else {
+          setModalType("success");
+          setModalTitle("無異動");
+          setModalMessage(
+            copySuccess
+              ? `內容未改變，已複製原分享連結：${shareLink}`
+              : `內容未改變，保持原分享連結（複製失敗，請手動複製）：${shareLink}`
+          );
+          setModalData(null);
+        }
+      } else {
+        setNotice("代碼生成失敗：未回傳分享代碼。");
+      }
         }
       } else {
         setNotice("代碼生成失敗：未回傳分享代碼。");
