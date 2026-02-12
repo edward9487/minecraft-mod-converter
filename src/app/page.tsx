@@ -1130,6 +1130,10 @@ export default function Home() {
     );
     if (exists) {
       setNotice("此模組已在清單中。");
+      // 即使模組已存在，也要隱藏菜單
+      if (!options?.keepOpen) {
+        setShowSearch(false);
+      }
       return;
     }
 
