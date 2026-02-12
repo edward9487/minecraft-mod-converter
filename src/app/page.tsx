@@ -714,16 +714,6 @@ export default function Home() {
   const executeGenerateCode = async () => {
     setIsGeneratingCode(true);
     try {
-      const loaderId = toLoaderId(loader);
-    const currentHash = await computeContentHash(targetVersion, loaderId, cartItems, selectedMods);
-      
-    if (currentShareCode && currentShareCodeHash === currentHash) {
-      const shareLink = `${window.location.origin}/?s=${encodeURIComponent(currentShareCode)}`;
-      setNotice(`無異動，保持現有分享連結：${shareLink}`);
-      setIsGeneratingCode(false);
-      return;
-    }
-      
       const payload = {
         code: currentShareCode ?? undefined,
         targetVersion,
@@ -779,7 +769,6 @@ export default function Home() {
       if (data.code) {
         const wasUpdated = Boolean(data.updated);
         setCurrentShareCode(data.code);
-        setCurrentShareCodeHash(currentHash);
         const shareLink = typeof window !== "undefined"
           ? `${window.location.origin}/?s=${encodeURIComponent(data.code)}`
           : data.code;
@@ -788,23 +777,22 @@ export default function Home() {
         }
         try {
           await navigator.clipboard.writeText(shareLink);
-          if (typeof window !== "undefined") {
-            window.alert(`已經複製${shareLink}到剪貼簿`);
+          if (wasUpdated) {
+            setModalType("success");
+            setModalTitle("已更新");
+            setModalMessage(`分享連結已更新並複製：${shareLink}`);
+            setModalData(null);
+          } else {
+            setModalType("success");
+            setModalTitle("無異動");
+            setModalMessage(`內容未改變，保持原分享連結：${shareLink}`);
+            setModalData(null);
           }
-          setNotice(
-            wasUpdated
-              ? `已更新分享連結並複製：${shareLink}`
-              : `已建立分享連結並複製：${shareLink}`
-          );
         } catch (error) {
-          if (typeof window !== "undefined") {
-            window.alert("複製失敗，請手動複製提示訊息中的連結。");
-          }
-          setNotice(
-            wasUpdated
-              ? `已更新分享連結：${shareLink}`
-              : `已建立分享連結：${shareLink}`
-          );
+          const msg = wasUpdated
+            ? `已更新分享連結：${shareLink}`
+            : `內容無異動，保持原分享連結：${shareLink}`;
+          setNotice(msg);
         }
       } else {
         setNotice("代碼生成失敗：未回傳分享代碼。");
@@ -857,15 +845,6 @@ export default function Home() {
         .map((item) => item.id);
       setSelectedMods(new Set(selectedIds));
       setCurrentShareCode(code.toUpperCase());
-      
-      // 使用加載的數據計算 hash，避免使用可能未更新的 state
-      const codeHash = await computeContentHash(
-        data.targetVersion || targetVersion,
-        data.loader || toLoaderId(loader),
-        normalized,
-        new Set(selectedIds)
-      );
-      setCurrentShareCodeHash(codeHash);
       
       setShowSearch(false);
       setNotice(`已載入代碼清單，共 ${normalized.length} 筆。`);

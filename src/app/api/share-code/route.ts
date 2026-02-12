@@ -65,34 +65,21 @@ export async function POST(request: NextRequest) {
     const contentHash = computeHash(body);
     const requestedCode = body.code?.toUpperCase();
 
-    // 檢查現有代碼的內容是否改變
+    // 如果有現有代碼且內容完全相同，返回原代碼
     if (requestedCode) {
       const existing = getShareCode(requestedCode);
-      if (existing) {
-        if (existing.contentHash === contentHash) {
-          // 內容未改變，保持原代碼
-          return NextResponse.json({ code: requestedCode, updated: false });
-        } else {
-          // 內容已改變，覆蓋該代碼
-          saveShareCode(requestedCode, {
-            targetVersion: body.targetVersion,
-            loader: body.loader,
-            items: body.items,
-            contentHash,
-            savedAt: new Date().toISOString(),
-          });
-          return NextResponse.json({ code: requestedCode, updated: true });
-        }
+      if (existing && existing.contentHash === contentHash) {
+        return NextResponse.json({ code: requestedCode, updated: false });
       }
     }
 
-    // 查詢已有相同內容的代碼
-    const existingCode = findShareCodeByHash(contentHash);
-    if (existingCode) {
-      return NextResponse.json({ code: existingCode, updated: false });
+    // 查詢是否已有相同內容的代碼
+    const existingCodeByHash = findShareCodeByHash(contentHash);
+    if (existingCodeByHash) {
+      return NextResponse.json({ code: existingCodeByHash, updated: false });
     }
 
-    // 生成新代碼
+    // 生成新代碼（內容改變或首次生成）
     let code = generateCode();
     let attempts = 0;
     while (getShareCode(code) && attempts < 100) {
@@ -115,7 +102,10 @@ export async function POST(request: NextRequest) {
       savedAt: new Date().toISOString(),
     });
 
-    return NextResponse.json({ code, updated: false });
+    return NextResponse.json({ 
+      code, 
+      updated: requestedCode ? true : false 
+    });
   } catch (error) {
     console.error("Share code POST error:", error);
     return NextResponse.json(
