@@ -39,7 +39,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Missing code" }, { status: 400 });
   }
   
-  const payload = getShareCode(code);
+  const payload = await getShareCode(code);
   if (!payload) {
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
@@ -67,14 +67,14 @@ export async function POST(request: NextRequest) {
 
     // 如果有現有代碼且內容完全相同，返回原代碼
     if (requestedCode) {
-      const existing = getShareCode(requestedCode);
+      const existing = await getShareCode(requestedCode);
       if (existing && existing.contentHash === contentHash) {
         return NextResponse.json({ code: requestedCode, updated: false });
       }
     }
 
     // 查詢是否已有相同內容的代碼
-    const existingCodeByHash = findShareCodeByHash(contentHash);
+    const existingCodeByHash = await findShareCodeByHash(contentHash);
     if (existingCodeByHash) {
       return NextResponse.json({ code: existingCodeByHash, updated: false });
     }
@@ -82,7 +82,7 @@ export async function POST(request: NextRequest) {
     // 生成新代碼（內容改變或首次生成）
     let code = generateCode();
     let attempts = 0;
-    while (getShareCode(code) && attempts < 100) {
+    while ((await getShareCode(code)) && attempts < 100) {
       code = generateCode();
       attempts++;
     }
@@ -94,7 +94,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    saveShareCode(code, {
+    await saveShareCode(code, {
       targetVersion: body.targetVersion,
       loader: body.loader,
       items: body.items,
@@ -108,8 +108,12 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("Share code POST error:", error);
+    console.error("Error details:", {
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    });
     return NextResponse.json(
-      { error: "Failed to save" },
+      { error: "Failed to save", details: error instanceof Error ? error.message : String(error) },
       { status: 500 }
     );
   }
