@@ -11,6 +11,11 @@ type DependencyItem = {
   iconUrl?: string;
 };
 
+type SupportedLoaderInfo = {
+  loader: string;
+  latestVersion?: string;
+};
+
 type CartItem = {
   id: string;
   title: string;
@@ -30,7 +35,7 @@ type CartItem = {
   note?: string;
   isCustom?: boolean;
   customUrl?: string;
-  supportedLoaders?: string[];
+  supportedLoaders?: SupportedLoaderInfo[];
 };
 
 type GameVersionTag = {
@@ -52,6 +57,7 @@ type ProjectInfo = {
 type VersionInfo = {
   id: string;
   game_versions?: string[];
+  loaders?: string[];
   date_published?: string;
   files?: { url: string; primary?: boolean; filename?: string }[];
   dependencies?: { project_id?: string; dependency_type?: string }[];
@@ -122,6 +128,23 @@ function normalizeDependencies(value: unknown): DependencyItem[] {
   return (value as DependencyItem[]).filter(
     (item) => item && typeof item.id === "string"
   );
+}
+
+function normalizeSupportedLoaders(value: unknown): SupportedLoaderInfo[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => {
+      if (typeof entry === "string") return { loader: entry };
+      if (!entry || typeof entry !== "object") return null;
+      const loader = (entry as { loader?: unknown }).loader;
+      if (typeof loader !== "string" || !loader.trim()) return null;
+      const latestVersion = (entry as { latestVersion?: unknown }).latestVersion;
+      return {
+        loader,
+        latestVersion: typeof latestVersion === "string" ? latestVersion : undefined,
+      };
+    })
+    .filter((entry): entry is SupportedLoaderInfo => Boolean(entry));
 }
 
 function generateLocalId() {
@@ -198,13 +221,19 @@ function filterVersions(versions: string[]): string[] {
   });
 }
 
+function getLatestGameVersion(gameVersions: string[] | undefined) {
+  if (!gameVersions || !gameVersions.length) return undefined;
+  const filtered = filterVersions(gameVersions);
+  return filtered[0];
+}
+
 function getLatestSupportedVersion(versions: VersionInfo[]) {
   if (!versions.length) return undefined;
   const sorted = [...versions].sort((a, b) =>
     (b.date_published ?? "").localeCompare(a.date_published ?? "")
   );
   const latest = sorted[0] ?? versions[0];
-  return latest.game_versions?.[0];
+  return getLatestGameVersion(latest.game_versions);
 }
 
 function getMajorVersion(version: string) {
@@ -596,29 +625,42 @@ export default function Home() {
       )}&loader=${encodeURIComponent(loaderId)}`
     );
 
-    // 檢測此版本支持的所有 Loader
-    const supportedLoaders: string[] = [];
+    // 檢測模組在所有版本中支持的 Loader 與最新版本
+    let supportedLoaders: SupportedLoaderInfo[] = [];
     const loaderLabel = (id: string) => loaderLabelMap[id] || id;
-    
-    for (const loaderKey of Object.keys(loaderLabelMap)) {
-      try {
-        const checkResponse = await fetch(
-          `/api/modrinth?type=versions&projectId=${encodeURIComponent(
-            item.id
-          )}&gameVersion=${encodeURIComponent(
-            targetVersion
-          )}&loader=${encodeURIComponent(loaderKey)}`,
-          { signal: AbortSignal.timeout(5000) }
-        );
-        if (checkResponse.ok) {
-          const versions = (await checkResponse.json()) as VersionInfo[];
-          if (versions.length > 0) {
-            supportedLoaders.push(loaderLabel(loaderKey));
+    const loaderOrder = [...availableLoaders, ...fallbackLoaders];
+    const supportedLoaderMap = new Map<string, string | undefined>();
+    const allVersionsResponse = await fetch(
+      `/api/modrinth?type=versions&projectId=${encodeURIComponent(item.id)}`
+    );
+    if (allVersionsResponse.ok) {
+      const allVersions = (await allVersionsResponse.json()) as VersionInfo[];
+      allVersions.forEach((version) => {
+        const bestGameVersion = getLatestGameVersion(version.game_versions);
+        (version.loaders ?? []).forEach((loaderKey) => {
+          const label = loaderLabel(loaderKey);
+          const existing = supportedLoaderMap.get(label);
+          if (!existing) {
+            supportedLoaderMap.set(label, bestGameVersion);
+            return;
           }
-        }
-      } catch (error) {
-        // 靜默忽略超時或其他錯誤
-      }
+          if (
+            bestGameVersion &&
+            compareVersions(bestGameVersion, existing) > 0
+          ) {
+            supportedLoaderMap.set(label, bestGameVersion);
+          }
+        });
+      });
+      supportedLoaders = Array.from(supportedLoaderMap.entries())
+        .map(([loader, latestVersion]) => ({ loader, latestVersion }))
+        .sort((a, b) => {
+          const aIndex = loaderOrder.indexOf(a.loader);
+          const bIndex = loaderOrder.indexOf(b.loader);
+          const safeA = aIndex === -1 ? Number.MAX_SAFE_INTEGER : aIndex;
+          const safeB = bIndex === -1 ? Number.MAX_SAFE_INTEGER : bIndex;
+          return safeA - safeB;
+        });
     }
 
     if (response.ok) {
@@ -648,7 +690,8 @@ export default function Home() {
       const versions = (await fallbackResponse.json()) as VersionInfo[];
       const bestVersion = getBestSupportedVersion(versions, targetVersion);
       const lastSupported =
-        bestVersion?.game_versions?.[0] ?? getLatestSupportedVersion(versions);
+        getLatestGameVersion(bestVersion?.game_versions) ??
+        getLatestSupportedVersion(versions);
       const dependencies = await resolveDependencyTitles(
         bestVersion?.dependencies
       );
@@ -837,6 +880,7 @@ export default function Home() {
           note: item.note ?? "",
           isCustom: item.isCustom ?? false,
           customUrl: item.customUrl ?? "",
+          supportedLoaders: item.supportedLoaders ?? [],
         })),
       };
 
@@ -952,7 +996,7 @@ export default function Home() {
         note: item.note ?? "",
         isCustom: item.isCustom ?? false,
         customUrl: item.customUrl ?? "",
-        supportedLoaders: Array.isArray(item.supportedLoaders) ? item.supportedLoaders : [],
+        supportedLoaders: normalizeSupportedLoaders(item.supportedLoaders),
       }));
       if (data.targetVersion) setTargetVersion(data.targetVersion);
       if (data.loader) {
@@ -1326,7 +1370,7 @@ export default function Home() {
         note: typeof item.note === "string" ? item.note : "",
         isCustom: Boolean(item.isCustom),
         customUrl: typeof item.customUrl === "string" ? item.customUrl : "",
-        supportedLoaders: Array.isArray(item.supportedLoaders) ? item.supportedLoaders : [],
+        supportedLoaders: normalizeSupportedLoaders(item.supportedLoaders),
       }));
       setCartItems(normalized);
       setNotice(`已匯入 ${normalized.length} 筆清單。`);
@@ -1688,7 +1732,14 @@ export default function Home() {
                         )}
                         {item.supportedLoaders && item.supportedLoaders.length > 0 && (
                           <p className="text-xs text-purple-600 mt-1 truncate">
-                            支援：{item.supportedLoaders.join(", ")}
+                            支援：
+                            {item.supportedLoaders
+                              .map((entry) =>
+                                entry.latestVersion
+                                  ? `${entry.loader} ${entry.latestVersion}`
+                                  : entry.loader
+                              )
+                              .join(", ")}
                           </p>
                         )}
                         <div className="mt-2">
