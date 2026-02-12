@@ -1,13 +1,37 @@
 import Database from "better-sqlite3";
 import path from "path";
 import os from "os";
+import fs from "fs";
 
 let db: Database.Database | null = null;
+
+function getDbPath(): string {
+  // 優先使用環境變數指定的路徑
+  if (process.env.DATABASE_PATH) {
+    return process.env.DATABASE_PATH;
+  }
+
+  // 生產環境：使用用戶主目錄下的 .minecraft-mod-converter 目錄
+  if (process.env.NODE_ENV === "production") {
+    const dataDir = path.join(os.homedir(), ".minecraft-mod-converter");
+    if (!fs.existsSync(dataDir)) {
+      fs.mkdirSync(dataDir, { recursive: true });
+    }
+    return path.join(dataDir, "modlist-share-codes.db");
+  }
+
+  // 開發環境：使用本地項目的 .data 目錄
+  const devDir = path.join(process.cwd(), ".data");
+  if (!fs.existsSync(devDir)) {
+    fs.mkdirSync(devDir, { recursive: true });
+  }
+  return path.join(devDir, "modlist-share-codes.db");
+}
 
 export function getDb(): Database.Database {
   if (db) return db;
 
-  const dbPath = path.join(os.tmpdir(), "modlist-share-codes.db");
+  const dbPath = getDbPath();
   db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
 
