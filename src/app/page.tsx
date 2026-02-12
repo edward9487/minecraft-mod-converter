@@ -1383,6 +1383,12 @@ export default function Home() {
 
   const handleRemove = (id: string) => {
     setCartItems((items) => items.filter((item) => item.id !== id));
+    setSelectedMods((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
     setNotice("已移除清單項目。");
   };
 
@@ -1713,10 +1719,12 @@ export default function Home() {
                             />
                           </div>
                         ) : (
-                          <p className="text-sm font-semibold truncate">{item.title}</p>
+                          <p className="text-sm font-semibold whitespace-normal break-words overflow-hidden [display:-webkit-box] [-webkit-line-clamp:2] [-webkit-box-orient:vertical]">
+                            {item.title}
+                          </p>
                         )}
                         {item.filename && item.status === "可更新" && (
-                          <p className="text-xs text-emerald-700 mt-1 truncate">
+                          <p className="text-xs text-emerald-700 mt-1 whitespace-normal break-words overflow-hidden [display:-webkit-box] [-webkit-line-clamp:2] [-webkit-box-orient:vertical]">
                             📦 {item.filename}
                           </p>
                         )}
@@ -1726,7 +1734,7 @@ export default function Home() {
                           </p>
                         ) : null}
                         {item.dependencies && item.dependencies.length > 0 && (
-                          <p className="text-xs text-blue-600 mt-1 truncate">
+                          <p className="text-xs text-blue-600 mt-1 whitespace-normal break-words overflow-hidden [display:-webkit-box] [-webkit-line-clamp:2] [-webkit-box-orient:vertical]">
                             前置：{item.dependencies.map((dep) => dep.title).join(", ")}
                           </p>
                         )}
