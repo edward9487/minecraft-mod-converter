@@ -42,6 +42,7 @@ type LoaderTag = {
 };
 
 type ProjectInfo = {
+  id?: string;
   title?: string;
   game_versions?: string[];
   icon_url?: string;
@@ -205,6 +206,28 @@ function getLatestSupportedVersion(versions: VersionInfo[]) {
   return latest.game_versions?.[0];
 }
 
+function getMajorVersion(version: string) {
+  const parts = version.split(".").slice(0, 2);
+  return parts.join(".");
+}
+
+function getBestSupportedVersion(
+  versions: VersionInfo[],
+  targetVersion: string
+): VersionInfo | undefined {
+  if (!versions.length) return undefined;
+  const major = getMajorVersion(targetVersion);
+  const sameMajor = versions.filter((version) =>
+    version.game_versions?.some((gameVersion) =>
+      gameVersion.startsWith(`${major}.`) || gameVersion === major
+    )
+  );
+  const sorted = [...(sameMajor.length ? sameMajor : versions)].sort((a, b) =>
+    (b.date_published ?? "").localeCompare(a.date_published ?? "")
+  );
+  return sorted[0] ?? versions[0];
+}
+
 function isModrinthUrl(input: string): boolean {
   return /modrinth\.com\/mod/i.test(input);
 }
@@ -233,6 +256,7 @@ async function fetchProjectInfoById(id: string) {
     if (!response.ok) return {};
     const data = (await response.json()) as ProjectInfo;
     return {
+      id: data.id,
       title: data.title,
       iconUrl: data.icon_url,
       currentVersion: data.game_versions?.[0],
@@ -291,12 +315,17 @@ export default function Home() {
   const [searchResults, setSearchResults] = useState<SearchResult["hits"]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+  const [searchHighlightIndex, setSearchHighlightIndex] = useState(-1);
   const [versionCache, setVersionCache] = useState<Record<string, string>>({});
   const isTargetLockedRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const unifiedInputRef = useRef<HTMLInputElement | null>(null);
+  const searchMenuRef = useRef<HTMLDivElement | null>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const blurTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const [selectedMods, setSelectedMods] = useState<Set<string>>(new Set());
   const [unifiedInput, setUnifiedInput] = useState("");
+  const [selectedResultId, setSelectedResultId] = useState<string | null>(null);
   const [modalType, setModalType] = useState<"confirm" | "success" | null>(null);
   const [modalTitle, setModalTitle] = useState("");
   const [modalMessage, setModalMessage] = useState("");
@@ -339,6 +368,16 @@ export default function Home() {
   const activeCount = useMemo(() => {
     return cartItems.filter((item) => !item.paused).length;
   }, [cartItems]);
+
+  // 高亮項目時自動滾動菜單
+  useEffect(() => {
+    if (searchHighlightIndex >= 0 && searchMenuRef.current) {
+      const items = searchMenuRef.current.querySelectorAll('button[role="option"]');
+      if (items[searchHighlightIndex]) {
+        items[searchHighlightIndex].scrollIntoView({ block: 'nearest', behavior: 'auto' });
+      }
+    }
+  }, [searchHighlightIndex, searchResults.length]);
 
   useEffect(() => {
     const loadMetadata = async () => {
@@ -445,25 +484,28 @@ export default function Home() {
       return;
     }
 
-    const exists = cartItems.some((item) => item.id === slug);
-    if (exists) {
-      setNotice("此模組已在清單中。");
-      return;
-    }
-
     setIsAdding(true);
     try {
       let title = slug.charAt(0).toUpperCase() + slug.slice(1);
       let currentVersion = "未知";
       let iconUrl: string | undefined = undefined;
       const projectInfo = await fetchProjectInfoById(slug);
+      const canonicalId = projectInfo.id ?? slug;
       if (projectInfo.title) title = projectInfo.title;
       if (projectInfo.currentVersion) currentVersion = projectInfo.currentVersion;
       iconUrl = projectInfo.iconUrl;
 
+      const exists = cartItems.some(
+        (item) => item.id === canonicalId || item.id === slug
+      );
+      if (exists) {
+        setNotice("此模組已在清單中。");
+        return;
+      }
+
       setCartItems((items) => [
         {
-          id: slug,
+          id: canonicalId,
           title,
           source: "Modrinth",
           currentVersion,
@@ -533,6 +575,7 @@ export default function Home() {
     const projectInfo = await fetchProjectInfoById(item.id);
     const baseItem = {
       ...item,
+      id: projectInfo.id ?? item.id,
       title: projectInfo.title ?? item.title,
       iconUrl: projectInfo.iconUrl ?? item.iconUrl,
       currentVersion:
@@ -574,7 +617,12 @@ export default function Home() {
     );
     if (fallbackResponse.ok) {
       const versions = (await fallbackResponse.json()) as VersionInfo[];
-      const lastSupported = getLatestSupportedVersion(versions);
+      const bestVersion = getBestSupportedVersion(versions, targetVersion);
+      const lastSupported =
+        bestVersion?.game_versions?.[0] ?? getLatestSupportedVersion(versions);
+      const dependencies = await resolveDependencyTitles(
+        bestVersion?.dependencies
+      );
       return {
         ...baseItem,
         targetVersion: "-",
@@ -582,6 +630,7 @@ export default function Home() {
         statusTone: "warning" as StatusTone,
         lastSupportedVersion: lastSupported,
         filename: undefined,
+        dependencies,
       };
     }
 
@@ -622,15 +671,28 @@ export default function Home() {
     setNotice("解析中，請稍候...");
 
     try {
-      const resolved = await runPool(cartItems, 10, resolveItem);
-      const existingIds = new Set(cartItems.map((item) => item.id));
+      const idMap = new Map<string, string>();
+      const resolved = await runPool(cartItems, 10, async (item) => {
+        const result = await resolveItem(item);
+        idMap.set(item.id, result.id);
+        return result;
+      });
+      const existingIds = new Set(resolved.map((item) => item.id));
+      const resolvedById = new Map(resolved.map((item) => [item.id, item]));
       const dependencyItems: CartItem[] = [];
       const dependencyIds = new Set<string>();
       const dependencySelectionMap = new Map<string, boolean>();
 
       resolved.forEach((item) => {
         item.dependencies?.forEach((dep) => {
-          if (existingIds.has(dep.id) || dependencyIds.has(dep.id)) return;
+          if (existingIds.has(dep.id)) {
+            const existing = resolvedById.get(dep.id);
+            if (existing && !existing.isDependency) {
+              existing.isDependency = true;
+            }
+            return;
+          }
+          if (dependencyIds.has(dep.id)) return;
           
           const isCurrentSelected = selectedMods.has(item.id);
           if (dependencySelectionMap.has(dep.id)) {
@@ -669,7 +731,10 @@ export default function Home() {
         }));
         setCartItems(resetItems);
         
-        const updatedSelectedMods = new Set(selectedMods);
+        const updatedSelectedMods = new Set<string>();
+        selectedMods.forEach((id) => {
+          updatedSelectedMods.add(idMap.get(id) ?? id);
+        });
         dependencySelectionMap.forEach((shouldSelect, depId) => {
           if (shouldSelect) {
             updatedSelectedMods.add(depId);
@@ -686,6 +751,11 @@ export default function Home() {
           downloaded: false,
         }));
         setCartItems(resetItems);
+        const updatedSelectedMods = new Set<string>();
+        selectedMods.forEach((id) => {
+          updatedSelectedMods.add(idMap.get(id) ?? id);
+        });
+        setSelectedMods(updatedSelectedMods);
         setNotice(`完成解析，${targetVersion}（${loader}）。`);
       }
     } catch (error) {
@@ -775,7 +845,7 @@ export default function Home() {
         if (typeof window !== "undefined") {
           window.history.replaceState(null, "", `/?s=${encodeURIComponent(data.code)}`);
         }
-        
+
         let copySuccess = false;
         try {
           await navigator.clipboard.writeText(shareLink);
@@ -783,7 +853,15 @@ export default function Home() {
         } catch (error) {
           console.error("複製失敗:", error);
         }
-        
+
+        const alertMessage = copySuccess
+          ? `已經複製分享連結到剪貼簿：${shareLink}`
+          : `複製失敗，請手動複製分享連結：${shareLink}`;
+
+        if (typeof window !== "undefined") {
+          window.alert(alertMessage);
+        }
+
         // 無論複製成功或失敗，都顯示對話框
         if (wasUpdated) {
           setModalType("success");
@@ -803,10 +881,6 @@ export default function Home() {
               : `內容未改變，保持原分享連結（複製失敗，請手動複製）：${shareLink}`
           );
           setModalData(null);
-        }
-      } else {
-        setNotice("代碼生成失敗：未回傳分享代碼。");
-      }
         }
       } else {
         setNotice("代碼生成失敗：未回傳分享代碼。");
@@ -954,12 +1028,25 @@ export default function Home() {
   };
 
   const handleUnifiedInput = async (value: string) => {
+    // 如果已選中模組，檢查是否開始新搜尋
+    // 若輸入值不是從舊值開始的（例如全選後輸入新內容），則清空已選狀態
+    if (selectedResultId) {
+      const isNewSearch = !unifiedInput.startsWith(value) && value.length < unifiedInput.length;
+      const isDifferentInput = value.trim() !== unifiedInput.trim();
+      if (isNewSearch || isDifferentInput) {
+        setSelectedResultId(null);
+        setSearchHighlightIndex(-1);
+      }
+    }
+
     setUnifiedInput(value);
     clearTimeout(searchTimeoutRef.current);
 
     if (!value.trim()) {
       setSearchResults([]);
       setSearchQuery("");
+      setSearchHighlightIndex(-1);
+      setSelectedResultId(null);
       return;
     }
 
@@ -967,12 +1054,14 @@ export default function Home() {
     if (isModrinthUrl(value)) {
       setSearchResults([]);
       setSearchQuery("");
+      setSearchHighlightIndex(-1);
       setShowSearch(false);
       return;
     }
 
     // 否則作為搜尋
     setShowSearch(true);
+    setSearchHighlightIndex(-1);
     setSearchQuery(value);
     searchTimeoutRef.current = setTimeout(async () => {
       setIsSearching(true);
@@ -983,9 +1072,17 @@ export default function Home() {
         if (response.ok) {
           const data = (await response.json()) as SearchResult;
           setSearchResults(data.hits || []);
+          // 優先高亮已選中的項目
+          if (selectedResultId && data.hits) {
+            const index = data.hits.findIndex(h => h.project_id === selectedResultId);
+            setSearchHighlightIndex(index >= 0 ? index : 0);
+          } else {
+            setSearchHighlightIndex(data.hits && data.hits.length ? 0 : -1);
+          }
         }
       } catch (error) {
         setNotice("搜尋失敗，請稍後再試。");
+        setSearchHighlightIndex(-1);
       } finally {
         setIsSearching(false);
       }
@@ -1019,8 +1116,18 @@ export default function Home() {
     setNotice("請從搜尋結果點選模組，或輸入分享代碼/連結再按新增。");
   };
 
-  const handleSelectSearchResult = async (result: SearchResult["hits"][0]) => {
-    const exists = cartItems.some((item) => item.id === result.slug);
+  const handleSelectSearchResult = async (
+    result: SearchResult["hits"][0],
+    options?: {
+      keepInput?: boolean;
+      keepResults?: boolean;
+      keepOpen?: boolean;
+      showModal?: boolean;
+    }
+  ) => {
+    const exists = cartItems.some(
+      (item) => item.id === result.project_id || item.id === result.slug
+    );
     if (exists) {
       setNotice("此模組已在清單中。");
       return;
@@ -1028,7 +1135,7 @@ export default function Home() {
 
     setCartItems((items) => [
       {
-        id: result.slug,
+        id: result.project_id,
         title: result.title,
         source: "Modrinth",
         currentVersion: "未知",
@@ -1048,9 +1155,72 @@ export default function Home() {
       ...items,
     ]);
     setSearchQuery("");
-    setSearchResults([]);
-    setShowSearch(false);
-    setNotice(`已加入 ${result.title}，等待解析。`);
+    setSelectedResultId(result.project_id);
+    setUnifiedInput(result.title);
+    if (!options?.keepResults) {
+      // 清空菜單，但稍後會在聚焦時重新搜尋
+      setSearchResults([]);
+    }
+    if (!options?.keepOpen) {
+      setShowSearch(false);
+    }
+    if (options?.showModal) {
+      setModalType("success");
+      setModalTitle("已加入");
+      setModalMessage(`已加入 ${result.title}，等待解析。`);
+      setModalData(null);
+    } else {
+      setNotice(`已加入 ${result.title}，等待解析。`);
+    }
+  };
+
+  const handleUnifiedInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "ArrowDown" && showSearch && searchResults.length > 0) {
+      event.preventDefault();
+      setSearchHighlightIndex((prev) =>
+        prev < 0 ? 0 : (prev + 1) % searchResults.length
+      );
+      return;
+    }
+
+    if (event.key === "ArrowUp" && showSearch && searchResults.length > 0) {
+      event.preventDefault();
+      setSearchHighlightIndex((prev) =>
+        prev <= 0 ? searchResults.length - 1 : (prev - 1) % searchResults.length
+      );
+      return;
+    }
+
+    if (event.key === "Enter") {
+      const trimmed = unifiedInput.trim();
+      const shareCodeFromLink = extractShareCode(trimmed);
+
+      if (shareCodeFromLink || isShareCode(trimmed) || isModrinthUrl(trimmed)) {
+        event.preventDefault();
+        handleUnifiedInputSubmit();
+        return;
+      }
+
+      if (searchResults.length > 0) {
+        event.preventDefault();
+        if (searchHighlightIndex < 0) {
+          setSearchHighlightIndex(0);
+          return;
+        }
+        const selected = searchResults[searchHighlightIndex];
+        if (selected) {
+          handleSelectSearchResult(selected);
+        }
+      } else if (selectedResultId) {
+        // 菜單隱藏但有已選中項目，提示已存在
+        event.preventDefault();
+        const selectedItem = cartItems.find(item => item.id === selectedResultId);
+        if (selectedItem) {
+          setNotice("此模組已在清單中。");
+          setShowSearch(false);
+        }
+      }
+    }
   };
 
   const handleToggleSelection = (id: string) => {
@@ -1269,13 +1439,29 @@ export default function Home() {
                   <div className="relative z-20">
                     <div className="flex gap-2">
                       <input
+                        ref={unifiedInputRef}
                         className="flex-1 h-12 rounded-2xl border border-[color:var(--line)] bg-white px-4 text-sm focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20"
                         placeholder="搜尋模組、貼上 modrinth 連結或輸入清單代碼"
                         value={unifiedInput}
                         onChange={(event) => handleUnifiedInput(event.target.value)}
-                        onFocus={() =>
-                          !isModrinthUrl(unifiedInput) && setShowSearch(true)
-                        }
+                        onFocus={() => {
+                          // 全選文字，讓用戶再次輸入時覆蓋
+                          unifiedInputRef.current?.select();
+                          if (unifiedInput.trim() && !isModrinthUrl(unifiedInput)) {
+                            // 如果搜尋結果為空但有已選模組，重新搜尋
+                            if (selectedResultId && searchResults.length === 0) {
+                              handleUnifiedInput(unifiedInput);
+                            } else {
+                              setShowSearch(true);
+                            }
+                          }
+                        }}
+                        onBlur={() => {
+                          clearTimeout(blurTimeoutRef.current);
+                          blurTimeoutRef.current = setTimeout(() => {
+                            setShowSearch(false);
+                          }, 150);
+                        }}
                         onPaste={() =>
                           setTimeout(() => {
                             if (!isModrinthUrl(unifiedInput)) {
@@ -1283,7 +1469,7 @@ export default function Home() {
                             }
                           }, 0)
                         }
-                        onKeyDown={(e) => e.key === "Enter" && handleUnifiedInputSubmit()}
+                        onKeyDown={handleUnifiedInputKeyDown}
                       />
                       <button
                         onClick={handleUnifiedInputSubmit}
@@ -1295,7 +1481,11 @@ export default function Home() {
                       </button>
                     </div>
                     {showSearch && unifiedInput.trim() && !isModrinthUrl(unifiedInput) && (
-                      <div className="absolute top-full left-0 right-0 mt-2 max-h-96 overflow-y-auto rounded-2xl border border-[color:var(--line)] bg-white shadow-2xl z-50">
+                      <div
+                        ref={searchMenuRef}
+                        className="absolute top-full left-0 right-0 mt-2 max-h-96 overflow-y-auto rounded-2xl border border-[color:var(--line)] bg-white shadow-2xl z-50"
+                        onMouseDown={(e) => e.preventDefault()}
+                      >
                         {isSearching && (
                           <div className="px-4 py-6 text-center text-sm text-[color:var(--muted)]">
                             搜尋中...
@@ -1306,16 +1496,22 @@ export default function Home() {
                             找不到相符的模組
                           </div>
                         )}
-                        {searchResults.map((result) => (
+                        {searchResults.map((result, index) => (
                           <button
                             key={result.project_id}
                             type="button"
+                            role="option"
                             onClick={() => {
+                              clearTimeout(blurTimeoutRef.current);
                               handleSelectSearchResult(result);
-                              setUnifiedInput("");
-                              setShowSearch(false);
                             }}
-                            className="w-full px-4 py-3 text-left hover:bg-orange-50 border-b border-[color:var(--line)] last:border-b-0 transition"
+                            onMouseEnter={() => setSearchHighlightIndex(index)}
+                            className={`w-full px-4 py-3 text-left border-b border-[color:var(--line)] last:border-b-0 transition ${
+                              index === searchHighlightIndex
+                                ? "bg-orange-200 border-l-4 border-orange-500"
+                                : "hover:bg-orange-50"
+                            }`}
+                            aria-selected={index === searchHighlightIndex}
                           >
                             <div className="flex items-center gap-3">
                               {result.icon_url && (
