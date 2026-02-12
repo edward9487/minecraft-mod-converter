@@ -52,9 +52,9 @@ function computeHash(payload: { targetVersion: string; loader: string; items: un
       title: item.title,
       isDependency: item.isDependency,
       isSelected: item.isSelected,
-      note: typeof item.note === "string" ? item.note : "",
+      note: item.note ?? "",
       isCustom: Boolean(item.isCustom),
-      customUrl: typeof item.customUrl === "string" ? item.customUrl : "",
+      customUrl: item.customUrl ?? "",
     })),
   });
   return createHash("sha256").update(normalized).digest("hex");

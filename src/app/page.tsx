@@ -140,17 +140,9 @@ async function computeContentHash(
       title: item.title,
       isDependency: item.isDependency,
       isSelected: selectedMods.has(item.id),
-      note: typeof item.note === "string" ? item.note : "",
-      isCustom: Boolean(item.isCustom),
-      customUrl: typeof item.customUrl === "string" ? item.customUrl : "",
-    })),
-  });
-  
-  const encoder = new TextEncoder();
-  const data = encoder.encode(normalized);
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hashArray = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+          note: item.note ?? "",
+          isCustom: item.isCustom ?? false,
+          customUrl: item.customUrl ?? "",
 }
 
 function compareVersions(a: string, b: string) {
@@ -842,9 +834,9 @@ export default function Home() {
         dependencies: normalizeDependencies(item.dependencies),
         isDependency: item.isDependency ?? false,
         isSelected: item.isSelected ?? false,
-        note: typeof item.note === "string" ? item.note : "",
-        isCustom: Boolean(item.isCustom),
-        customUrl: typeof item.customUrl === "string" ? item.customUrl : "",
+        note: item.note ?? "",
+        isCustom: item.isCustom ?? false,
+        customUrl: item.customUrl ?? "",
       }));
       if (data.targetVersion) setTargetVersion(data.targetVersion);
       if (data.loader) {
@@ -858,10 +850,10 @@ export default function Home() {
       setSelectedMods(new Set(selectedIds));
       setCurrentShareCode(code.toUpperCase());
       
-      const loaderId = data.loader || toLoaderId(loader);
+      // 使用加載的數據計算 hash，避免使用可能未更新的 state
       const codeHash = await computeContentHash(
         data.targetVersion || targetVersion,
-        loaderId,
+        data.loader || toLoaderId(loader),
         normalized,
         new Set(selectedIds)
       );
