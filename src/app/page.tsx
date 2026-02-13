@@ -363,6 +363,9 @@ export default function Home() {
   const [pendingAction, setPendingAction] = useState<string>("");
   const [currentShareCode, setCurrentShareCode] = useState<string | null>(null);
   const [currentShareCodeHash, setCurrentShareCodeHash] = useState<string | null>(null);
+  const [failedCandidates, setFailedCandidates] = useState<{original: string, slug: string}[]>([]);
+  const [batchResults, setBatchResults] = useState<Map<string, "success" | "failed">>(new Map());
+  const [showOnlyFailed, setShowOnlyFailed] = useState(false);
 
   const statusStyles: Record<StatusTone, string> = {
     success: "bg-emerald-100 text-emerald-800 border-emerald-200",
@@ -734,6 +737,78 @@ export default function Home() {
     });
     await Promise.all(runners);
     return results;
+  };
+
+  const extractCandidateFromLine = (line: string): string | null => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || trimmed.startsWith("//")) return null;
+    
+    let base = trimmed.toLowerCase();
+    base = base.replace(/_/g, ""); // 移除下劃線
+    
+    const loaderTags = new Set(["fabric", "forge", "quilt", "neoforge"]);
+    const parts = base.split(/[\s\-_]+/);
+    const result: string[] = [];
+    
+    for (const part of parts) {
+      const lower = part.toLowerCase();
+      const isVersionLike = /^\d/.test(part) && part.includes(".");
+      const isMcTag = /^(mc|minecraft)[\d.]+$/.test(lower);
+      const hasDecimal = /\d+\.\d+/.test(lower); // 檢測小數點
+      
+      if (loaderTags.has(lower) || isVersionLike || isMcTag || hasDecimal) break;
+      result.push(part);
+    }
+    
+    return result.length > 0 ? result.join("-") : null;
+  };
+
+  const parseTextCandidates = (text: string): {original: string, slug: string}[] => {
+    const lines = text.split(/\r?\n/);
+    const results: {original: string, slug: string}[] = [];
+    
+    for (const line of lines) {
+      const slug = extractCandidateFromLine(line);
+      if (slug) {
+        results.push({ original: line.trim(), slug });
+      }
+    }
+    
+    return results;
+  };
+
+  const resolveCandidate = async (candidate: {original: string, slug: string}): Promise<{candidate: {original: string, slug: string}, success: boolean, item?: CartItem}> => {
+    try {
+      const response = await fetch(`/api/modrinth?type=search&q=${encodeURIComponent(candidate.slug)}&limit=1`);
+      if (!response.ok) throw new Error("搜尋失敗");
+      
+      const data = await response.json() as SearchResult;
+      if (data.hits.length === 0) {
+        return { candidate, success: false };
+      }
+      
+      const project = data.hits[0];
+      const newItem: CartItem = {
+        id: project.project_id,
+        title: project.title,
+        source: "Modrinth",
+        currentVersion: "未知",
+        targetVersion: targetVersion,
+        status: "待解析",
+        statusTone: "accent",
+        paused: false,
+        downloaded: false,
+        iconUrl: project.icon_url,
+        isDependency: false,
+        note: `【批次匯入】搜尋文本: ${candidate.slug}`,
+        isCustom: false,
+        customUrl: "",
+      };
+      
+      return { candidate, success: true, item: newItem };
+    } catch {
+      return { candidate, success: false };
+    }
   };
 
   const handleResolve = async () => {
@@ -1350,34 +1425,94 @@ export default function Home() {
 
     try {
       const content = await file.text();
-      const parsed = JSON.parse(content) as { items?: CartItem[] } | CartItem[];
-      const items = Array.isArray(parsed) ? parsed : parsed.items ?? [];
-      const normalized = items.map((item) => ({
-        id: item.id,
-        title: item.title ?? item.id,
-        source: item.source ?? "Modrinth",
-        currentVersion: item.currentVersion ?? "未知",
-        targetVersion: item.targetVersion ?? targetVersion,
-        status: item.status ?? "待解析",
-        statusTone: (item.statusTone ?? "accent") as StatusTone,
-        paused: item.paused ?? false,
-        lastSupportedVersion: item.lastSupportedVersion,
-        downloaded: item.downloaded ?? false,
-        filename: item.filename,
-        iconUrl: item.iconUrl,
-        dependencies: normalizeDependencies(item.dependencies),
-        isDependency: item.isDependency ?? false,
-        note: typeof item.note === "string" ? item.note : "",
-        isCustom: Boolean(item.isCustom),
-        customUrl: typeof item.customUrl === "string" ? item.customUrl : "",
-        supportedLoaders: normalizeSupportedLoaders(item.supportedLoaders),
-      }));
-      setCartItems(normalized);
-      setNotice(`已匯入 ${normalized.length} 筆清單。`);
+      let modNames: string[] = [];
+
+      // 根據檔案類型處理
+      if (file.name.endsWith('.json')) {
+        const parsed = JSON.parse(content) as { items?: CartItem[] } | CartItem[];
+        const items = Array.isArray(parsed) ? parsed : parsed.items ?? [];
+        modNames = items.map(item => item.id || item.title).filter(Boolean);
+      } else if (file.name.endsWith('.md') || file.name.endsWith('.txt')) {
+        // .md 和 .txt 檔案直接按行分割
+        modNames = content.split(/\r?\n/).filter(line => line.trim());
+      }
+      
+      const newContent = modNames.join("\n");
+      
+      setUnifiedInput(prev => {
+        if (prev.trim()) {
+          return prev + "\n" + newContent;
+        }
+        return newContent;
+      });
+      
+      setNotice(`已添加 ${modNames.length} 個模組到輸入框，請點擊「確認」開始批次處理。`);
     } catch (error) {
       setNotice("匯入失敗，請確認檔案格式。");
     } finally {
       event.target.value = "";
+    }
+  };
+
+  const handleUnifiedConfirm = async () => {
+    if (!unifiedInput.trim() || isAdding) return;
+    
+    // 檢查是否包含多行（批次模式）
+    const lines = unifiedInput.split(/\r?\n/).filter(line => line.trim());
+    
+    if (lines.length > 1) {
+      // 批次匯入模式
+      setIsAdding(true);
+      setNotice("批次匯入中...");
+      
+      try {
+        const candidates = parseTextCandidates(unifiedInput);
+        if (candidates.length === 0) {
+          setNotice("未找到有效的模組名稱");
+          return;
+        }
+        
+        const limit = 6;
+        const results: {candidate: {original: string, slug: string}, success: boolean, item?: CartItem}[] = [];
+        
+        for (let i = 0; i < candidates.length; i += limit) {
+          const batch = candidates.slice(i, i + limit);
+          const batchResults = await Promise.all(batch.map(resolveCandidate));
+          results.push(...batchResults);
+        }
+        
+        const successItems: CartItem[] = [];
+        const failed: {original: string, slug: string}[] = [];
+        const resultsMap = new Map<string, "success" | "failed">();
+        
+        for (const result of results) {
+          if (result.success && result.item) {
+            if (!cartItems.some(item => item.id === result.item!.id)) {
+              successItems.push(result.item);
+            }
+            resultsMap.set(result.candidate.original, "success");
+          } else {
+            failed.push(result.candidate);
+            resultsMap.set(result.candidate.original, "failed");
+          }
+        }
+        
+        if (successItems.length > 0) {
+          setCartItems(prev => [...prev, ...successItems]);
+        }
+        
+        setFailedCandidates(failed);
+        setBatchResults(resultsMap);
+        setUnifiedInput("");
+        setNotice(`批次匯入完成：成功 ${successItems.length} 個，失敗 ${failed.length} 個`);
+      } catch (error) {
+        setNotice("批次匯入失敗");
+      } finally {
+        setIsAdding(false);
+      }
+    } else {
+      // 單個搜尋/添加模式
+      handleUnifiedInputSubmit();
     }
   };
 
@@ -1434,12 +1569,8 @@ export default function Home() {
   return (
     <div className="min-h-screen pb-24 text-[15px] text-[color:var(--ink)]">
       <header className="mx-auto max-w-6xl px-6 pt-16">
-        <div className="flex flex-col gap-8 lg:flex-row lg:items-end lg:justify-between">
-          <div className="space-y-4">
-            <span className="inline-flex items-center gap-2 rounded-full border border-[color:var(--line)] bg-white/80 px-4 py-1 text-xs uppercase tracking-[0.24em] text-[color:var(--muted)]">
-              高效清單工具
-              <span className="h-1.5 w-1.5 rounded-full bg-[color:var(--accent)] animate-glow" />
-            </span>
+        <div className="grid gap-6 lg:grid-cols-[1.5fr_auto_0.8fr] lg:grid-rows-[auto_auto] items-end">
+          <div className="space-y-4 lg:col-span-2 lg:row-start-1">
             <h1 className="text-4xl font-semibold tracking-tight text-[color:var(--ink)] md:text-5xl">
               Minecraft 模組跨版本清單轉換器
             </h1>
@@ -1448,219 +1579,299 @@ export default function Home() {
               清單下載。
             </p>
           </div>
-          <div className="grid w-full gap-4 rounded-3xl border border-[color:var(--line)] bg-white/80 p-5 shadow-ember lg:max-w-sm">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-medium text-[color:var(--muted)]">
-                目標環境
-              </span>
-              <span className="rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-800">
-                Beta
-              </span>
+          <div className="rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember lg:row-start-1 lg:row-end-3">
+            <h3 className="text-lg font-semibold whitespace-nowrap">快速流程</h3>
+            <ol className="mt-4 space-y-3 text-sm text-[color:var(--muted)]">
+              <li>1. 搜尋或匯入模組清單</li>
+              <li>2. 選擇目標版本與 Loader</li>
+              <li>3. 執行解析並查看缺失</li>
+              <li>4. 補齊依賴或手動處理</li>
+              <li>5. 下載清單 JSON</li>
+            </ol>
+          </div>
+          {notice && (
+            <div className="lg:col-span-2 lg:row-start-2 rounded-2xl border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-800">
+              {notice}
             </div>
-            <div className="grid gap-3">
-              <label className="text-xs text-[color:var(--muted)]">
-                遊戲版本
-              </label>
-              <select
-                className="h-11 rounded-xl border border-[color:var(--line)] bg-white px-4 text-sm"
-                value={targetVersion}
-                onChange={(event) => setTargetVersion(event.target.value)}
-                disabled={isLoadingVersions}
-              >
-                {isLoadingVersions ? (
-                  <option>載入版本中...</option>
-                ) : (
-                  availableVersions.map((version) => (
-                    <option key={version} value={version}>
-                      {version}
-                    </option>
-                  ))
-                )}
-              </select>
+          )}
+        </div>
+      </header>
+
+      <main className="mx-auto mt-14 max-w-6xl space-y-6 px-6">
+        <div className="grid gap-6 lg:grid-cols-[1.5fr_auto_0.8fr] rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember animate-fade-up">
+          <div>
+            <div className="flex flex-col gap-2 mb-6">
+              <h2 className="text-xl font-semibold whitespace-nowrap">模組清單輸入</h2>
+              <p className="text-sm text-[color:var(--muted)]">
+                搜尋模組、貼上連結或批次匯入（每行一個模組名稱）
+              </p>
             </div>
-            <div className="grid gap-3">
-              <label className="text-xs text-[color:var(--muted)]">
-                Loader
-              </label>
-              <div className="grid grid-cols-3 gap-2 text-sm">
-                {availableLoaders.map((item) => (
-                  <button
-                    key={item}
-                    className={`h-10 rounded-xl border px-2 font-medium transition ${
-                      loader === item
-                        ? "border-orange-200 bg-orange-50 text-orange-800"
-                        : "border-[color:var(--line)] text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700"
-                    }`}
-                    type="button"
-                    onClick={() => setLoader(item)}
-                  >
-                    {item}
-                  </button>
-                ))}
+            <div className="flex flex-col gap-6">
+              <div className="flex flex-col gap-3">
+                <label className="text-xs text-[color:var(--muted)]">
+                  搜尋或批次輸入（支持多行）
+                </label>
+                <div className="relative z-20">
+                  <div className="flex gap-2">
+                    <textarea
+                      ref={unifiedInputRef as any}
+                      className="flex-1 min-h-[80px] max-h-[400px] rounded-2xl border border-[color:var(--line)] bg-white px-4 py-3 text-sm focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20 resize-y"
+                      placeholder="搜尋模組、貼上 modrinth 連結、輸入清單代碼或批次輸入（每行一個模組名稱）&#10;例如：sodium&#10;lithium&#10;iris"
+                      value={unifiedInput}
+                      onChange={(event) => handleUnifiedInput(event.target.value)}
+                      onFocus={() => {
+                        if (unifiedInput.trim() && !isModrinthUrl(unifiedInput) && !unifiedInput.includes('\n')) {
+                          if (selectedResultId && searchResults.length === 0) {
+                            handleUnifiedInput(unifiedInput);
+                          } else {
+                            setShowSearch(true);
+                          }
+                        }
+                      }}
+                      onBlur={() => {
+                        clearTimeout(blurTimeoutRef.current);
+                        blurTimeoutRef.current = setTimeout(() => {
+                          setShowSearch(false);
+                        }, 150);
+                      }}
+                      onPaste={() =>
+                        setTimeout(() => {
+                          if (!isModrinthUrl(unifiedInput) && !unifiedInput.includes('\n')) {
+                            setShowSearch(true);
+                          }
+                        }, 0)
+                      }
+                      rows={1}
+                    />
+                    <button
+                      onClick={handleUnifiedConfirm}
+                      disabled={isAdding || !unifiedInput.trim()}
+                      className="h-12 px-6 rounded-2xl bg-[color:var(--accent)] text-white font-semibold hover:brightness-110 disabled:opacity-50 transition self-start"
+                      type="button"
+                    >
+                      確認
+                    </button>
+                  </div>
+
+                  {showSearch && unifiedInput.trim() && !isModrinthUrl(unifiedInput) && !unifiedInput.includes('\n') && (
+                    <div
+                      ref={searchMenuRef}
+                      className="absolute top-full left-0 right-0 mt-2 max-h-96 overflow-y-auto rounded-2xl border border-[color:var(--line)] bg-white shadow-2xl z-50"
+                      onMouseDown={(e) => e.preventDefault()}
+                    >
+                      {isSearching && (
+                        <div className="px-4 py-6 text-center text-sm text-[color:var(--muted)]">
+                          搜尋中...
+                        </div>
+                      )}
+                      {!isSearching && searchResults.length === 0 && (
+                        <div className="px-4 py-6 text-center text-sm text-[color:var(--muted)]">
+                          找不到相符的模組
+                        </div>
+                      )}
+                      {searchResults.map((result, index) => (
+                        <button
+                          key={result.project_id}
+                          type="button"
+                          role="option"
+                          onClick={() => {
+                            clearTimeout(blurTimeoutRef.current);
+                            handleSelectSearchResult(result);
+                          }}
+                          onMouseEnter={() => setSearchHighlightIndex(index)}
+                          className={`w-full px-4 py-3 text-left border-b border-[color:var(--line)] last:border-b-0 transition ${
+                            index === searchHighlightIndex
+                              ? "bg-orange-200 border-l-4 border-orange-500"
+                              : "hover:bg-orange-50"
+                          }`}
+                          aria-selected={index === searchHighlightIndex}
+                        >
+                          <div className="flex items-center gap-3">
+                            {result.icon_url && (
+                              <img
+                                src={result.icon_url}
+                                alt={result.title}
+                                className="w-8 h-8 rounded-lg"
+                              />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-medium truncate">{result.title}</p>
+                              <p className="text-xs text-[color:var(--muted)] truncate">
+                                {result.slug}
+                              </p>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
+              <div className="flex flex-col gap-4">
+                <div className="flex items-center justify-between rounded-2xl border border-[color:var(--line)] bg-[color:var(--bg)] px-4 py-3">
+                  <div className="flex-1 flex items-center gap-2">
+                    <p className="text-sm font-medium">匯入清單</p>
+                    <p className="text-xs text-[color:var(--muted)]">支援: .json .md .txt</p>
+                  </div>
+                  <button
+                    className="h-10 rounded-full border border-[color:var(--line)] px-4 text-xs font-semibold text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700 flex-shrink-0 ml-2"
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    選擇檔案
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".json,.md,.txt"
+                    onChange={handleImportFile}
+                    className="hidden"
+                  />
+                </div>
+                
+                {/* 批次結果顯示 */}
+                {batchResults.size > 0 && (
+                  <>
+                    <div className="mt-3 max-h-32 overflow-y-auto rounded-2xl border border-[color:var(--line)] bg-white p-3 space-y-1">
+                      {Array.from(batchResults.entries())
+                        .filter(([, status]) => !showOnlyFailed || status === "failed")
+                        .map(([original, status]) => (
+                          <div
+                            key={original}
+                            className={`px-3 py-2 rounded-xl text-xs font-medium ${
+                              status === "success"
+                                ? "text-green-700 bg-green-50"
+                                : "text-red-700 bg-red-50"
+                            }`}
+                          >
+                            {status === "success" ? "✓" : "✗"} {original}
+                          </div>
+                        ))}
+                    </div>
+                    
+                    {/* 切換顯示失敗結果按鈕 */}
+                    {failedCandidates.length > 0 && (
+                      <button
+                        onClick={() => setShowOnlyFailed(!showOnlyFailed)}
+                        className={`h-10 rounded-2xl border text-sm font-semibold transition ${
+                          showOnlyFailed
+                            ? "border-orange-300 bg-orange-100 text-orange-800"
+                            : "border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100"
+                        }`}
+                        type="button"
+                      >
+                        {showOnlyFailed ? "顯示全部結果" : `僅顯示失敗 (${failedCandidates.length})`}
+                      </button>
+                    )}
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="border-l border-[color:var(--line)] pl-6">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-xl font-semibold whitespace-nowrap">目標環境</h2>
+              <span className="rounded-full bg-orange-100 px-3 py-1 text-xs font-semibold text-orange-800">Beta</span>
+            </div>
+            <div className="grid gap-4">
+              <div className="grid gap-3">
+                <label className="text-xs text-[color:var(--muted)]">
+                  版本
+                </label>
+                <select
+                  className="h-11 rounded-xl border border-[color:var(--line)] bg-white px-4 text-sm"
+                  value={targetVersion}
+                  onChange={(event) => setTargetVersion(event.target.value)}
+                  disabled={isLoadingVersions}
+                >
+                  {isLoadingVersions ? (
+                    <option>載入中...</option>
+                  ) : (
+                    availableVersions.map((version) => (
+                      <option key={version} value={version}>
+                        {version}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+              <div className="grid gap-3">
+                <label className="text-xs text-[color:var(--muted)]">
+                  Loader
+                </label>
+                <div className="grid grid-cols-3 gap-2 text-sm">
+                  {availableLoaders.map((item) => (
+                    <button
+                      key={item}
+                      className={`h-10 rounded-xl border px-2 font-medium transition ${
+                        loader === item
+                          ? "border-orange-200 bg-orange-50 text-orange-800"
+                          : "border-[color:var(--line)] text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700"
+                      }`}
+                      type="button"
+                      onClick={() => setLoader(item)}
+                    >
+                      {item}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="border-l border-[color:var(--line)] pl-6">
+            <h2 className="text-xl font-semibold whitespace-nowrap mb-4">代碼清單</h2>
+            <p className="text-sm text-[color:var(--muted)] mb-5">
+              生成分享連結後，可在輸入框貼上連結或代碼並按新增載入清單。
+            </p>
+            <div className="grid gap-3">
+              <button
+                className="h-12 rounded-2xl bg-[color:var(--accent)] text-sm font-semibold text-white hover:bg-[color:var(--accent-deep)] disabled:cursor-not-allowed disabled:opacity-60"
+                type="button"
+                onClick={handleResolve}
+                disabled={isResolving}
+              >
+                {isResolving ? "解析中..." : "一鍵解析"}
+              </button>
+              <button
+                className="h-12 rounded-2xl border border-[color:var(--line)] text-sm font-semibold text-[color:var(--muted)] disabled:cursor-not-allowed disabled:opacity-60"
+                type="button"
+                onClick={handleGenerateCode}
+                disabled={!cartItems.length || isGeneratingCode}
+              >
+                {isGeneratingCode ? "存檔中..." : "分享連結(存檔)"}
+              </button>
             </div>
           </div>
         </div>
-        {notice ? (
-          <div className="mt-6 rounded-2xl border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-800">
-            {notice}
-          </div>
-        ) : null}
-      </header>
 
-      <main className="mx-auto mt-14 grid max-w-6xl gap-6 px-6 lg:grid-cols-[1.35fr_0.65fr]">
-        <section className="space-y-6">
-          <div className="relative z-30 rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember animate-fade-up">
-            <div className="grid gap-4 lg:grid-cols-[1fr_180px] overflow-visible">
-              <div className="flex flex-col gap-6">
-                <div className="flex flex-col gap-2">
-                  <h2 className="text-xl font-semibold">模組清單輸入</h2>
-                  <p className="text-sm text-[color:var(--muted)]">
-                    搜尋 Modrinth 模組或上傳清單匯入，僅收集 Project ID。
-                  </p>
-                </div>
-                <div className="flex flex-col gap-3">
-                  <label className="text-xs text-[color:var(--muted)]">
-                    搜尋或貼上連結
-                  </label>
-                  <div className="relative z-20">
-                    <div className="flex gap-2">
-                      <input
-                        ref={unifiedInputRef}
-                        className="flex-1 h-12 rounded-2xl border border-[color:var(--line)] bg-white px-4 text-sm focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20"
-                        placeholder="搜尋模組、貼上 modrinth 連結或輸入清單代碼"
-                        value={unifiedInput}
-                        onChange={(event) => handleUnifiedInput(event.target.value)}
-                        onFocus={() => {
-                          // 全選文字，讓用戶再次輸入時覆蓋
-                          unifiedInputRef.current?.select();
-                          if (unifiedInput.trim() && !isModrinthUrl(unifiedInput)) {
-                            // 如果搜尋結果為空但有已選模組，重新搜尋
-                            if (selectedResultId && searchResults.length === 0) {
-                              handleUnifiedInput(unifiedInput);
-                            } else {
-                              setShowSearch(true);
-                            }
-                          }
-                        }}
-                        onBlur={() => {
-                          clearTimeout(blurTimeoutRef.current);
-                          blurTimeoutRef.current = setTimeout(() => {
-                            setShowSearch(false);
-                          }, 150);
-                        }}
-                        onPaste={() =>
-                          setTimeout(() => {
-                            if (!isModrinthUrl(unifiedInput)) {
-                              setShowSearch(true);
-                            }
-                          }, 0)
-                        }
-                        onKeyDown={handleUnifiedInputKeyDown}
-                      />
-                      <button
-                        onClick={handleUnifiedInputSubmit}
-                        disabled={isAdding || !unifiedInput.trim()}
-                        className="h-12 px-6 rounded-2xl bg-[color:var(--accent)] text-white font-semibold hover:brightness-110 disabled:opacity-50 transition"
-                        type="button"
-                      >
-                        新增
-                      </button>
-                    </div>
-                    {showSearch && unifiedInput.trim() && !isModrinthUrl(unifiedInput) && (
-                      <div
-                        ref={searchMenuRef}
-                        className="absolute top-full left-0 right-0 mt-2 max-h-96 overflow-y-auto rounded-2xl border border-[color:var(--line)] bg-white shadow-2xl z-50"
-                        onMouseDown={(e) => e.preventDefault()}
-                      >
-                        {isSearching && (
-                          <div className="px-4 py-6 text-center text-sm text-[color:var(--muted)]">
-                            搜尋中...
-                          </div>
-                        )}
-                        {!isSearching && searchResults.length === 0 && (
-                          <div className="px-4 py-6 text-center text-sm text-[color:var(--muted)]">
-                            找不到相符的模組
-                          </div>
-                        )}
-                        {searchResults.map((result, index) => (
-                          <button
-                            key={result.project_id}
-                            type="button"
-                            role="option"
-                            onClick={() => {
-                              clearTimeout(blurTimeoutRef.current);
-                              handleSelectSearchResult(result);
-                            }}
-                            onMouseEnter={() => setSearchHighlightIndex(index)}
-                            className={`w-full px-4 py-3 text-left border-b border-[color:var(--line)] last:border-b-0 transition ${
-                              index === searchHighlightIndex
-                                ? "bg-orange-200 border-l-4 border-orange-500"
-                                : "hover:bg-orange-50"
-                            }`}
-                            aria-selected={index === searchHighlightIndex}
-                          >
-                            <div className="flex items-center gap-3">
-                              {result.icon_url && (
-                                <img
-                                  src={result.icon_url}
-                                  alt={result.title}
-                                  className="w-8 h-8 rounded-lg"
-                                />
-                              )}
-                              <div className="flex-1 min-w-0">
-                                <p className="text-sm font-medium truncate">{result.title}</p>
-                                <p className="text-xs text-[color:var(--muted)] truncate">
-                                  {result.slug}
-                                </p>
-                              </div>
-                            </div>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-              <div className="flex flex-col gap-4 mt-[18px]">
-                <div className="flex items-center justify-between rounded-2xl border border-[color:var(--line)] bg-[color:var(--bg)] px-4 py-3">
-                  <div className="flex-1 flex items-center">
-                    <p className="text-sm font-medium">下載清單</p>
-                  </div>
-                  <button
-                    className="h-10 rounded-full border border-[color:var(--line)] px-4 text-xs font-semibold text-[color:var(--muted)] disabled:opacity-50 flex-shrink-0 ml-2"
-                    type="button"
-                    onClick={handleDownloadSelected}
-                    disabled={selectedMods.size === 0}
-                  >
-                    下載清單
-                  </button>
-                </div>
-                <div className="flex items-center justify-between rounded-2xl border border-[color:var(--line)] bg-[color:var(--bg)] px-4 py-3">
-                  <div className="flex-1 flex items-center">
-                    <p className="text-sm font-medium">自訂模組</p>
-                  </div>
-                  <button
-                    className="h-10 rounded-full border border-[color:var(--line)] px-3 text-xs font-semibold text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700 flex-shrink-0 ml-2"
-                    type="button"
-                    onClick={handleAddCustomItem}
-                  >
-                    新增
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember animate-fade-up">
+        <div className="rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember animate-fade-up">
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-xl font-semibold">
+                <h2 className="text-xl font-semibold whitespace-nowrap">
                   模組清單（{selectedMods.size} / {cartItems.length}）
                 </h2>
                 <p className="text-sm text-[color:var(--muted)]">
                   依狀態分類，缺失項目需手動處理才能匯出。
                 </p>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  className="h-10 rounded-full border border-[color:var(--line)] px-4 text-xs font-semibold text-[color:var(--muted)] disabled:opacity-50 hover:border-orange-200 hover:text-orange-700 transition"
+                  type="button"
+                  onClick={handleDownloadSelected}
+                  disabled={selectedMods.size === 0}
+                >
+                  下載清單
+                </button>
+                <button
+                  className="h-10 rounded-full border border-[color:var(--line)] px-4 text-xs font-semibold text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700 transition"
+                  type="button"
+                  onClick={handleAddCustomItem}
+                >
+                  自訂模組
+                </button>
               </div>
             </div>
 
@@ -1851,48 +2062,6 @@ export default function Home() {
               ))}
             </div>
           </div>
-        </section>
-
-        <aside className="space-y-6">
-          <div className="rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember animate-fade-in">
-            <h3 className="text-lg font-semibold">快速流程</h3>
-            <ol className="mt-4 space-y-3 text-sm text-[color:var(--muted)]">
-              <li>1. 搜尋或匯入模組清單</li>
-              <li>2. 選擇目標版本與 Loader</li>
-              <li>3. 執行解析並查看缺失</li>
-              <li>4. 補齊依賴或手動處理</li>
-              <li>5. 下載清單 JSON</li>
-            </ol>
-            <div className="mt-5 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4 text-xs text-amber-800">
-              版本缺失時不自動降版，需手動確認後才能匯出。
-            </div>
-          </div>
-
-          <div className="rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember">
-            <h3 className="text-lg font-semibold">代碼清單</h3>
-            <p className="mt-2 text-sm text-[color:var(--muted)]">
-              生成分享連結後，可在輸入框貼上連結或代碼並按新增載入清單。
-            </p>
-            <div className="mt-5 grid gap-3">
-              <button
-                className="h-12 rounded-2xl bg-[color:var(--accent)] text-sm font-semibold text-white hover:bg-[color:var(--accent-deep)] disabled:cursor-not-allowed disabled:opacity-60"
-                type="button"
-                onClick={handleResolve}
-                disabled={isResolving}
-              >
-                {isResolving ? "解析中..." : "一鍵解析"}
-              </button>
-              <button
-                className="h-12 rounded-2xl border border-[color:var(--line)] text-sm font-semibold text-[color:var(--muted)] disabled:cursor-not-allowed disabled:opacity-60"
-                type="button"
-                onClick={handleGenerateCode}
-                disabled={!cartItems.length || isGeneratingCode}
-              >
-                {isGeneratingCode ? "存檔中..." : "分享連結(存檔)"}
-              </button>
-            </div>
-          </div>
-        </aside>
       </main>
     </div>
   );
