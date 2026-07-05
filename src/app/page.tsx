@@ -73,6 +73,11 @@ type VersionInfo = {
   dependencies?: { project_id?: string; dependency_type?: string }[];
 };
 
+type DownloadFile = {
+  url: string;
+  filename: string;
+};
+
 type SearchResult = {
   hits: Array<{
     project_id: string;
@@ -185,6 +190,21 @@ function normalizeSupportedLoaders(value: unknown): SupportedLoaderInfo[] {
 
 function generateLocalId() {
   return `custom-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+}
+
+function fallbackDownloadFilename(item: CartItem) {
+  const safeTitle = item.title.trim().replace(/[\\/:*?"<>|]/g, "-");
+  return `${safeTitle || item.id}.jar`;
+}
+
+function inferFilenameFromUrl(url: string, fallback: string) {
+  try {
+    const pathname = new URL(url).pathname;
+    const filename = decodeURIComponent(pathname.split("/").filter(Boolean).pop() ?? "");
+    return filename || fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 async function computeContentHash(
@@ -1174,6 +1194,44 @@ export default function Home() {
     window.open(url, "_blank", "noopener,noreferrer");
   };
 
+  const resolveDownloadFile = async (item: CartItem): Promise<DownloadFile | null> => {
+    const fallbackFilename = fallbackDownloadFilename(item);
+    const customUrl = item.customUrl?.trim();
+
+    if (item.isCustom) {
+      return customUrl
+        ? { url: customUrl, filename: inferFilenameFromUrl(customUrl, fallbackFilename) }
+        : null;
+    }
+
+    const loaderId = toLoaderId(loader);
+    const version = targetVersion.trim() || item.targetVersion;
+    const response = await fetch(
+      `/api/modrinth?type=versions&projectId=${encodeURIComponent(
+        item.id
+      )}&gameVersion=${encodeURIComponent(version)}&loader=${encodeURIComponent(loaderId)}`
+    );
+
+    if (!response.ok) {
+      throw new Error("無法連接 Modrinth API");
+    }
+
+    const versions = (await response.json()) as VersionInfo[];
+    const file =
+      versions[0]?.files?.find((entry) => entry.primary) ??
+      versions[0]?.files?.[0];
+
+    if (file?.url) {
+      return { url: file.url, filename: file.filename ?? fallbackFilename };
+    }
+
+    if (customUrl) {
+      return { url: customUrl, filename: inferFilenameFromUrl(customUrl, fallbackFilename) };
+    }
+
+    return null;
+  };
+
   const handleDownload = async (item: CartItem) => {
     if (item.status !== "可更新" && !item.downloaded) {
       if (item.paused) {
@@ -1193,33 +1251,8 @@ export default function Home() {
     if (!confirmed) return;
     setDownloadingId(item.id);
     try {
-      const loaderId = toLoaderId(loader);
-      const response = await fetch(
-        `/api/modrinth?type=versions&projectId=${encodeURIComponent(
-          item.id
-        )}&gameVersion=${encodeURIComponent(
-          targetVersion
-        )}&loader=${encodeURIComponent(loaderId)}`
-      );
-
-      if (!response.ok) {
-        setNotice(`❌ 下載 ${item.title} 失敗：無法連接 API，請檢查網路連線。`);
-        setDownloadingId(null);
-        return;
-      }
-
-      const versions = (await response.json()) as VersionInfo[];
-      if (!versions.length) {
-        setNotice(`❌ 下載 ${item.title} 失敗：此版本沒有可用的檔案。`);
-        setDownloadingId(null);
-        return;
-      }
-
-      const file =
-        versions[0].files?.find((entry) => entry.primary) ??
-        versions[0].files?.[0];
-
-      if (!file?.url) {
+      const file = await resolveDownloadFile(item);
+      if (!file) {
         setNotice(`❌ 下載 ${item.title} 失敗：找不到檔案連結，請稍後再試。`);
         setDownloadingId(null);
         return;
@@ -1229,9 +1262,7 @@ export default function Home() {
       link.href = file.url;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
-      if (file.filename) {
-        link.download = file.filename;
-      }
+      link.download = file.filename;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -1513,41 +1544,30 @@ export default function Home() {
 
         const total = selected.length;
         let processed = 0;
+        let failed = 0;
+        const downloadedIds = new Set<string>();
 
         for (const item of selected) {
           try {
-            const vResp = await fetch(
-              `/api/modrinth?type=versions&projectId=${encodeURIComponent(item.id)}&gameVersion=${encodeURIComponent(item.targetVersion)}&loader=${encodeURIComponent(loader)}`
-            );
-            let filesUrl: string | null = null;
-            let filename = `${item.title}.jar`;
-            if (vResp.ok) {
-              const versions = (await vResp.json()) as VersionInfo[];
-              const target = (versions && versions[0]) || null;
-              if (target && target.files && target.files.length) {
-                filesUrl = target.files[0].url;
-                filename = target.files[0].filename ?? filename;
-              }
-            }
-
-            if (!filesUrl && item.customUrl) {
-              filesUrl = item.customUrl;
-            }
-
-            if (!filesUrl) {
+            const file = await resolveDownloadFile(item);
+            if (!file) {
               // 無法取得檔案，加入文字檔說明
               zip.file(`${item.title}-NOTFOUND.txt`, `無法取得對應版本的下載連結：${item.id}`);
+              failed++;
             } else {
-              const fileResp = await fetch(filesUrl);
+              const fileResp = await fetch(file.url);
               if (fileResp.ok) {
                 const blob = await fileResp.blob();
-                zip.file(filename, blob);
+                zip.file(file.filename, blob);
+                downloadedIds.add(item.id);
               } else {
-                zip.file(`${item.title}-FAILED.txt`, `下載失敗：${filesUrl}`);
+                zip.file(`${item.title}-FAILED.txt`, `下載失敗：${file.url}`);
+                failed++;
               }
             }
           } catch {
             zip.file(`${item.title}-ERROR.txt`, `處理時發生錯誤`);
+            failed++;
           }
 
           processed++;
@@ -1568,7 +1588,19 @@ export default function Home() {
         a.click();
         a.remove();
 
-        setNotice("ZIP 打包完成，已開始下載。若未自動開始，請使用下方的下載按鈕。");
+        if (downloadedIds.size) {
+          setCartItems((items) =>
+            items.map((entry) =>
+              downloadedIds.has(entry.id) ? { ...entry, downloaded: true } : entry
+            )
+          );
+        }
+
+        setNotice(
+          failed
+            ? `ZIP 打包完成，${downloadedIds.size} 個檔案成功，${failed} 個項目需手動處理。`
+            : "ZIP 打包完成，已開始下載。若未自動開始，請使用下方的下載按鈕。"
+        );
       } catch (error) {
         console.error("Zip error:", error);
         setNotice("打包失敗，請稍後重試。");
@@ -2030,18 +2062,18 @@ export default function Home() {
         </div>
 
         <div className="relative z-0 rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember animate-fade-up">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-xl font-semibold whitespace-nowrap">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <h2 className="text-xl font-semibold whitespace-normal sm:whitespace-nowrap">
                   模組清單（{selectedMods.size} / {cartItems.length}）
                 </h2>
                 <p className="text-sm text-[color:var(--muted)]">
                   依狀態分類，缺失項目需手動處理才能匯出。
                 </p>
               </div>
-              <div className="flex gap-2">
+              <div className="flex flex-wrap gap-2 sm:justify-end">
                 <button
-                  className="h-10 rounded-full border border-[color:var(--line)] px-4 text-xs font-semibold text-[color:var(--muted)] disabled:opacity-50 hover:border-orange-200 hover:text-orange-700 transition"
+                  className="h-10 min-w-[5.75rem] shrink-0 whitespace-nowrap rounded-full border border-[color:var(--line)] px-4 text-xs font-semibold text-[color:var(--muted)] disabled:opacity-50 hover:border-orange-200 hover:text-orange-700 transition"
                   type="button"
                   onClick={handleDownloadSelected}
                   disabled={selectedMods.size === 0}
@@ -2049,7 +2081,7 @@ export default function Home() {
                   下載清單
                 </button>
                 <button
-                  className="h-10 rounded-full border border-[color:var(--line)] px-4 text-xs font-semibold text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700 transition"
+                  className="h-10 min-w-[5.75rem] shrink-0 whitespace-nowrap rounded-full border border-[color:var(--line)] px-4 text-xs font-semibold text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700 transition"
                   type="button"
                   onClick={handleAddCustomItem}
                 >
@@ -2065,7 +2097,7 @@ export default function Home() {
                 </div>
               ) : zipUrl ? (
                 <div className="w-full mt-3 flex items-center gap-2">
-                  <a href={zipUrl} className="h-9 rounded-full px-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold" download>
+                  <a href={zipUrl} className="inline-flex h-9 min-w-[5.75rem] shrink-0 items-center justify-center whitespace-nowrap rounded-full px-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold" download>
                     下載 ZIP
                   </a>
                 </div>
