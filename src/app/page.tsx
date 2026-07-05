@@ -1524,7 +1524,60 @@ export default function Home() {
     });
   };
 
-  const handleDownloadSelected = () => {
+  const handleDownloadList = () => {
+    const selected = cartItems.filter((item) => selectedMods.has(item.id));
+    if (!selected.length) {
+      setNotice("目前沒有已勾選的模組可匯出。");
+      return;
+    }
+
+    const confirmed = typeof window !== "undefined" && window.confirm(`確認要下載 ${selected.length} 筆模組清單 JSON 嗎？`);
+    if (!confirmed) return;
+
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      targetVersion,
+      loader: toLoaderId(loader),
+      selectedCount: selected.length,
+      totalCount: cartItems.length,
+      items: selected.map((item) => ({
+        id: item.id,
+        title: item.title,
+        source: item.source,
+        currentVersion: item.currentVersion,
+        targetVersion: item.targetVersion,
+        status: item.status,
+        statusTone: item.statusTone,
+        paused: item.paused,
+        lastSupportedVersion: item.lastSupportedVersion,
+        downloaded: item.downloaded ?? false,
+        filename: item.filename,
+        iconUrl: item.iconUrl,
+        dependencies: item.dependencies ?? [],
+        isDependency: item.isDependency ?? false,
+        isSelected: true,
+        note: item.note ?? "",
+        isCustom: item.isCustom ?? false,
+        customUrl: item.customUrl ?? "",
+        supportedLoaders: item.supportedLoaders ?? [],
+      })),
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `modlist-${targetVersion}-${toLoaderId(loader)}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    setNotice("已下載選中模組清單 JSON。");
+  };
+
+  const handleDownloadZip = () => {
     (async () => {
       const selected = cartItems.filter((item) => selectedMods.has(item.id));
       if (!selected.length) {
@@ -2071,11 +2124,11 @@ export default function Home() {
                   依狀態分類，缺失項目需手動處理才能匯出。
                 </p>
               </div>
-              <div className="flex flex-wrap gap-2 sm:justify-end">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-[auto_auto_auto] sm:justify-end">
                 <button
                   className="h-10 min-w-[5.75rem] shrink-0 whitespace-nowrap rounded-full border border-[color:var(--line)] px-4 text-xs font-semibold text-[color:var(--muted)] disabled:opacity-50 hover:border-orange-200 hover:text-orange-700 transition"
                   type="button"
-                  onClick={handleDownloadSelected}
+                  onClick={handleDownloadList}
                   disabled={selectedMods.size === 0}
                 >
                   下載清單
@@ -2087,6 +2140,14 @@ export default function Home() {
                 >
                   自訂模組
                 </button>
+                <button
+                  className="h-10 min-w-[5.75rem] shrink-0 whitespace-nowrap rounded-full border border-emerald-200 bg-emerald-50 px-4 text-xs font-semibold text-emerald-700 disabled:opacity-50 hover:bg-emerald-100 transition sm:row-span-1"
+                  type="button"
+                  onClick={handleDownloadZip}
+                  disabled={selectedMods.size === 0 || isZipping}
+                >
+                  {isZipping ? "打包中..." : "下載 ZIP"}
+                </button>
               </div>
               {isZipping ? (
                 <div className="w-full mt-3">
@@ -2096,9 +2157,10 @@ export default function Home() {
                   <p className="text-xs text-[color:var(--muted)] mt-1">打包進度：{zipProgress}%</p>
                 </div>
               ) : zipUrl ? (
-                <div className="w-full mt-3 flex items-center gap-2">
-                  <a href={zipUrl} className="inline-flex h-9 min-w-[5.75rem] shrink-0 items-center justify-center whitespace-nowrap rounded-full px-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold" download>
-                    下載 ZIP
+                <div className="w-full mt-3 text-xs text-[color:var(--muted)]">
+                  ZIP 已產生。
+                  <a href={zipUrl} className="ml-2 font-semibold text-emerald-700 underline" download>
+                    重新下載
                   </a>
                 </div>
               ) : null}
