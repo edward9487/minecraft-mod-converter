@@ -40,7 +40,7 @@ let db: DatabaseStore | null = null;
 let dbKind: DatabaseKind | null = null;
 
 function isVercelEnvironment(): boolean {
-  return process.env.VERCEL === "1" || !!process.env.KV_REST_API_URL;
+  return Boolean(process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN);
 }
 
 async function getKvDb(): Promise<KvStore> {
@@ -63,7 +63,9 @@ function getDbPath(): string {
   }
 
   if (process.env.NODE_ENV === "production") {
-    const dataDir = path.join(os.homedir(), ".minecraft-mod-converter");
+    const dataDir = process.env.VERCEL
+      ? path.join(os.tmpdir(), "minecraft-mod-converter")
+      : path.join(os.homedir(), ".minecraft-mod-converter");
     if (!fs.existsSync(dataDir)) {
       try {
         fs.mkdirSync(dataDir, { recursive: true });
@@ -103,6 +105,12 @@ function createJsonFileStore(error?: unknown): JsonFileStore {
     fs.writeFileSync(jsonPath, JSON.stringify({ shareCodes: {} }, null, 2), "utf8");
   }
   return { kind: "json", path: jsonPath };
+}
+
+function switchToJsonFileStore(error?: unknown): JsonFileStore {
+  db = createJsonFileStore(error);
+  dbKind = "json";
+  return db;
 }
 
 function readJsonStore(store: JsonFileStore): Record<string, StoredPayload & { createdAt?: string }> {
@@ -192,7 +200,9 @@ export async function getShareCode(code: string): Promise<StoredPayload | null> 
       return JSON.parse(typeof data === "string" ? data : JSON.stringify(data));
     } catch (error) {
       console.error("Failed to get share code from KV:", error);
-      return null;
+      const store = switchToJsonFileStore(error);
+      const shareCodes = readJsonStore(store);
+      return shareCodes[code.toUpperCase()] ?? null;
     }
   }
 
@@ -240,7 +250,14 @@ export async function saveShareCode(
       await kv.setex(hashKey, ttl, code.toUpperCase());
     } catch (error) {
       console.error("Failed to save share code to KV:", error);
-      throw error;
+      const store = switchToJsonFileStore(error);
+      const shareCodes = readJsonStore(store);
+      shareCodes[code.toUpperCase()] = {
+        ...payload,
+        savedAt: payload.savedAt,
+        createdAt: new Date().toISOString(),
+      };
+      writeJsonStore(store, shareCodes);
     }
     return;
   }
@@ -290,7 +307,12 @@ export async function findShareCodeByHash(contentHash: string): Promise<string |
       return code ? String(code) : null;
     } catch (error) {
       console.error("Failed to find share code by hash:", error);
-      return null;
+      const store = switchToJsonFileStore(error);
+      const shareCodes = readJsonStore(store);
+      const match = Object.entries(shareCodes).find(
+        ([, payload]) => payload.contentHash === contentHash
+      );
+      return match?.[0] ?? null;
     }
   }
 
