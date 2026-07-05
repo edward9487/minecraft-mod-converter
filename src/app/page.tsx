@@ -81,7 +81,7 @@ type DownloadFile = {
 type ExportedList = {
   targetVersion?: string;
   loader?: string;
-  items?: Partial<CartItem>[];
+  items?: Array<Partial<CartItem> & { projectUrl?: string }>;
 };
 
 type SearchResult = {
@@ -211,6 +211,37 @@ function inferFilenameFromUrl(url: string, fallback: string) {
   } catch {
     return fallback;
   }
+}
+
+function toExportedListItem(item: CartItem) {
+  const base = {
+    id: item.id,
+    title: item.title,
+    targetVersion: item.targetVersion,
+    isSelected: true,
+    isDependency: item.isDependency ?? false,
+    note: item.note ?? "",
+  };
+
+  if (item.isCustom) {
+    return {
+      ...item,
+      ...base,
+      dependencies: item.dependencies ?? [],
+      supportedLoaders: item.supportedLoaders ?? [],
+      customUrl: item.customUrl ?? "",
+      isCustom: true,
+    };
+  }
+
+  return {
+    ...base,
+    source: item.source,
+    filename: item.filename,
+    projectUrl: `https://modrinth.com/mod/${encodeURIComponent(item.id)}`,
+    dependencies: item.dependencies ?? [],
+    isCustom: false,
+  };
 }
 
 async function computeContentHash(
@@ -1554,27 +1585,7 @@ export default function Home() {
       loader: toLoaderId(loader),
       selectedCount: selected.length,
       totalCount: cartItems.length,
-      items: selected.map((item) => ({
-        id: item.id,
-        title: item.title,
-        source: item.source,
-        currentVersion: item.currentVersion,
-        targetVersion: item.targetVersion,
-        status: item.status,
-        statusTone: item.statusTone,
-        paused: item.paused,
-        lastSupportedVersion: item.lastSupportedVersion,
-        downloaded: item.downloaded ?? false,
-        filename: item.filename,
-        iconUrl: item.iconUrl,
-        dependencies: item.dependencies ?? [],
-        isDependency: item.isDependency ?? false,
-        isSelected: true,
-        note: item.note ?? "",
-        isCustom: item.isCustom ?? false,
-        customUrl: item.customUrl ?? "",
-        supportedLoaders: item.supportedLoaders ?? [],
-      })),
+      items: selected.map(toExportedListItem),
     };
 
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
