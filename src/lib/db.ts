@@ -18,7 +18,13 @@ type SqliteStore = {
   exec(sql: string): unknown;
 };
 
-type DatabaseStore = KvStore | SqliteStore;
+type JsonFileStore = {
+  kind: "json";
+  path: string;
+};
+
+type DatabaseStore = KvStore | SqliteStore | JsonFileStore;
+type DatabaseKind = "kv" | "sqlite" | "json";
 
 type ShareCodeRow = {
   id: string;
@@ -31,6 +37,7 @@ type ShareCodeRow = {
 };
 
 let db: DatabaseStore | null = null;
+let dbKind: DatabaseKind | null = null;
 
 function isVercelEnvironment(): boolean {
   return process.env.VERCEL === "1" || !!process.env.KV_REST_API_URL;
@@ -78,21 +85,59 @@ function getDbPath(): string {
   return path.join(dataDir, "modlist-share-codes.db");
 }
 
+function getJsonDbPath(): string {
+  const sqlitePath = getDbPath();
+  return sqlitePath.replace(/\.db$/i, ".json");
+}
+
+function createJsonFileStore(error?: unknown): JsonFileStore {
+  if (error) {
+    console.warn("SQLite unavailable, using JSON file storage:", error);
+  }
+  const jsonPath = getJsonDbPath();
+  const dir = path.dirname(jsonPath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  if (!fs.existsSync(jsonPath)) {
+    fs.writeFileSync(jsonPath, JSON.stringify({ shareCodes: {} }, null, 2), "utf8");
+  }
+  return { kind: "json", path: jsonPath };
+}
+
+function readJsonStore(store: JsonFileStore): Record<string, StoredPayload & { createdAt?: string }> {
+  try {
+    const raw = fs.readFileSync(store.path, "utf8");
+    const data = JSON.parse(raw) as { shareCodes?: Record<string, StoredPayload & { createdAt?: string }> };
+    return data.shareCodes ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function writeJsonStore(
+  store: JsonFileStore,
+  shareCodes: Record<string, StoredPayload & { createdAt?: string }>
+) {
+  fs.writeFileSync(store.path, JSON.stringify({ shareCodes }, null, 2), "utf8");
+}
+
 export async function getDb(): Promise<DatabaseStore> {
   if (db) return db;
 
   if (isVercelEnvironment()) {
     console.log("Using Vercel KV for storage");
     db = await getKvDb();
+    dbKind = "kv";
   } else {
     console.log("Using SQLite for storage");
-    const Database = (await import("better-sqlite3")).default;
-    const dbPath = getDbPath();
-    console.log("Opening database at:", dbPath);
-    
     try {
+      const Database = (await import("better-sqlite3")).default;
+      const dbPath = getDbPath();
+      console.log("Opening database at:", dbPath);
       const sqlite = new Database(dbPath) as SqliteStore;
       db = sqlite;
+      dbKind = "sqlite";
       sqlite.pragma("journal_mode = WAL");
 
       sqlite.exec(`
@@ -113,11 +158,17 @@ export async function getDb(): Promise<DatabaseStore> {
       console.log("Database initialized successfully");
     } catch (error) {
       console.error("Failed to initialize database:", error);
-      throw error;
+      db = createJsonFileStore(error);
+      dbKind = "json";
     }
   }
 
   return db;
+}
+
+async function getDbKind(): Promise<DatabaseKind> {
+  await getDb();
+  return dbKind ?? "sqlite";
 }
 
 export interface StoredPayload {
@@ -130,9 +181,9 @@ export interface StoredPayload {
 
 export async function getShareCode(code: string): Promise<StoredPayload | null> {
   const database = await getDb();
-  const isKv = isVercelEnvironment();
+  const kind = await getDbKind();
 
-  if (isKv) {
+  if (kind === "kv") {
     const key = `share_code:${code.toUpperCase()}`;
     try {
       const kv = database as KvStore;
@@ -143,7 +194,15 @@ export async function getShareCode(code: string): Promise<StoredPayload | null> 
       console.error("Failed to get share code from KV:", error);
       return null;
     }
-  } else {
+  }
+
+  if (kind === "json") {
+    const store = database as JsonFileStore;
+    const shareCodes = readJsonStore(store);
+    return shareCodes[code.toUpperCase()] ?? null;
+  }
+
+  {
     const sqlite = database as SqliteStore;
     const stmt = sqlite.prepare("SELECT * FROM share_codes WHERE id = ?");
     const row = stmt.get(code.toUpperCase()) as ShareCodeRow | undefined;
@@ -165,9 +224,9 @@ export async function saveShareCode(
   payload: StoredPayload
 ): Promise<void> {
   const database = await getDb();
-  const isKv = isVercelEnvironment();
+  const kind = await getDbKind();
 
-  if (isKv) {
+  if (kind === "kv") {
     const key = `share_code:${code.toUpperCase()}`;
     const ttl = 90 * 24 * 60 * 60;
     try {
@@ -183,7 +242,22 @@ export async function saveShareCode(
       console.error("Failed to save share code to KV:", error);
       throw error;
     }
-  } else {
+    return;
+  }
+
+  if (kind === "json") {
+    const store = database as JsonFileStore;
+    const shareCodes = readJsonStore(store);
+    shareCodes[code.toUpperCase()] = {
+      ...payload,
+      savedAt: payload.savedAt,
+      createdAt: new Date().toISOString(),
+    };
+    writeJsonStore(store, shareCodes);
+    return;
+  }
+
+  {
     const sqlite = database as SqliteStore;
     const stmt = sqlite.prepare(`
       INSERT OR REPLACE INTO share_codes 
@@ -206,9 +280,9 @@ export async function saveShareCode(
 
 export async function findShareCodeByHash(contentHash: string): Promise<string | null> {
   const database = await getDb();
-  const isKv = isVercelEnvironment();
+  const kind = await getDbKind();
 
-  if (isKv) {
+  if (kind === "kv") {
     const key = `share_code_hash:${contentHash}`;
     try {
       const kv = database as KvStore;
@@ -218,7 +292,18 @@ export async function findShareCodeByHash(contentHash: string): Promise<string |
       console.error("Failed to find share code by hash:", error);
       return null;
     }
-  } else {
+  }
+
+  if (kind === "json") {
+    const store = database as JsonFileStore;
+    const shareCodes = readJsonStore(store);
+    const match = Object.entries(shareCodes).find(
+      ([, payload]) => payload.contentHash === contentHash
+    );
+    return match?.[0] ?? null;
+  }
+
+  {
     const sqlite = database as SqliteStore;
     const stmt = sqlite.prepare("SELECT id FROM share_codes WHERE contentHash = ? LIMIT 1");
     const row = stmt.get(contentHash) as Pick<ShareCodeRow, "id"> | undefined;
@@ -228,12 +313,30 @@ export async function findShareCodeByHash(contentHash: string): Promise<string |
 
 export async function deleteOldShareCodes(daysOld: number = 90): Promise<number> {
   const database = await getDb();
-  const isKv = isVercelEnvironment();
+  const kind = await getDbKind();
 
-  if (isKv) {
+  if (kind === "kv") {
     console.log("Vercel KV handles TTL automatically");
     return 0;
-  } else {
+  }
+
+  if (kind === "json") {
+    const store = database as JsonFileStore;
+    const shareCodes = readJsonStore(store);
+    const cutoff = Date.now() - daysOld * 24 * 60 * 60 * 1000;
+    let removed = 0;
+    for (const [code, payload] of Object.entries(shareCodes)) {
+      const createdAt = payload.createdAt ? Date.parse(payload.createdAt) : Date.parse(payload.savedAt);
+      if (Number.isFinite(createdAt) && createdAt < cutoff) {
+        delete shareCodes[code];
+        removed++;
+      }
+    }
+    if (removed) writeJsonStore(store, shareCodes);
+    return removed;
+  }
+
+  {
     const cutoffDate = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000).toISOString();
     const sqlite = database as SqliteStore;
     const stmt = sqlite.prepare(

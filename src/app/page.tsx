@@ -78,6 +78,12 @@ type DownloadFile = {
   filename: string;
 };
 
+type ExportedList = {
+  targetVersion?: string;
+  loader?: string;
+  items?: Partial<CartItem>[];
+};
+
 type SearchResult = {
   hits: Array<{
     project_id: string;
@@ -731,10 +737,18 @@ export default function Home() {
     if (response.ok) {
       const versions = (await response.json()) as VersionInfo[];
       if (versions.length) {
-        const filename = versions[0].files?.[0]?.filename;
+        const matchedVersion = versions[0];
+        const filename = matchedVersion.files?.[0]?.filename;
         const dependencies = await resolveDependencyTitles(
-          versions[0].dependencies
+          matchedVersion.dependencies
         );
+        const targetSupportedLoaders = (matchedVersion.loaders?.length
+          ? matchedVersion.loaders
+          : [loaderId]
+        ).map((entry) => ({
+          loader: loaderLabel(entry),
+          latestVersion: targetVersion,
+        }));
         return {
           ...baseItem,
           targetVersion,
@@ -743,7 +757,7 @@ export default function Home() {
           lastSupportedVersion: undefined,
           filename,
           dependencies,
-          supportedLoaders,
+          supportedLoaders: targetSupportedLoaders,
         };
       }
     }
@@ -1674,9 +1688,62 @@ export default function Home() {
 
       // 根據檔案類型處理
       if (file.name.endsWith('.json')) {
-        const parsed = JSON.parse(content) as { items?: CartItem[] } | CartItem[];
-        const items = Array.isArray(parsed) ? parsed : parsed.items ?? [];
-        modNames = items.map(item => item.id || item.title).filter(Boolean);
+        const parsed = JSON.parse(content) as ExportedList | Partial<CartItem>[] | string[];
+        const importedItems = Array.isArray(parsed) ? parsed : parsed.items ?? [];
+
+        if (importedItems.length && typeof importedItems[0] === "object") {
+          const normalizedItems = (importedItems as Partial<CartItem>[])
+            .filter((item) => typeof item.id === "string" || typeof item.title === "string")
+            .map((item) => {
+              const id = item.id ?? item.title ?? generateLocalId();
+              return {
+                id,
+                title: item.title ?? id,
+                source: item.source ?? (item.isCustom ? "自訂" : "Modrinth"),
+                currentVersion: item.currentVersion ?? "未知",
+                targetVersion: item.targetVersion ?? (Array.isArray(parsed) ? targetVersion : parsed.targetVersion ?? targetVersion),
+                status: item.status ?? "待解析",
+                statusTone: item.statusTone ?? ("accent" as StatusTone),
+                paused: item.paused ?? false,
+                lastSupportedVersion: item.lastSupportedVersion,
+                downloaded: item.downloaded ?? false,
+                filename: item.filename,
+                iconUrl: item.iconUrl,
+                dependencies: normalizeDependencies(item.dependencies),
+                isDependency: item.isDependency ?? false,
+                isSelected: item.isSelected ?? true,
+                note: item.note ?? "",
+                isCustom: item.isCustom ?? false,
+                customUrl: item.customUrl ?? "",
+                supportedLoaders: normalizeSupportedLoaders(item.supportedLoaders),
+              };
+            });
+
+          if (!Array.isArray(parsed)) {
+            if (parsed.targetVersion) setTargetVersion(parsed.targetVersion);
+            if (parsed.loader) setLoader(loaderLabelMap[parsed.loader] ?? parsed.loader);
+          }
+
+          setCartItems((items) => {
+            const existingIds = new Set(items.map((item) => item.id));
+            const merged = [
+              ...items,
+              ...normalizedItems.filter((item) => !existingIds.has(item.id)),
+            ];
+            return merged;
+          });
+          setSelectedMods((prev) => {
+            const next = new Set(prev);
+            normalizedItems.forEach((item) => {
+              if (item.isSelected) next.add(item.id);
+            });
+            return next;
+          });
+          setNotice(`已匯入 ${normalizedItems.length} 筆清單資料。`);
+          return;
+        }
+
+        modNames = (importedItems as string[]).filter((item) => typeof item === "string" && item.trim());
       } else if (file.name.endsWith('.md') || file.name.endsWith('.txt')) {
         // .md 和 .txt 檔案直接按行分割
         modNames = content.split(/\r?\n/).filter(line => line.trim());
@@ -2247,7 +2314,7 @@ export default function Home() {
                         )}
                         {item.supportedLoaders && item.supportedLoaders.length > 0 && (
                           <p className="text-xs text-purple-600 mt-1 whitespace-normal break-words overflow-hidden [display:-webkit-box] [-webkit-line-clamp:2] [-webkit-box-orient:vertical]">
-                            支援：
+                            {item.status === "可更新" ? "相容：" : "支援概況："}
                             {item.supportedLoaders
                               .map((entry) =>
                                 entry.latestVersion
