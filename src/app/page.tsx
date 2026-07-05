@@ -295,7 +295,7 @@ function getBestSupportedVersion(
 }
 
 function isModrinthUrl(input: string): boolean {
-  return /modrinth\.com\/mod/i.test(input);
+  return /modrinth\.com\/(?:mod|modpack|resourcepack|shader|plugin|datapack|server)/i.test(input);
 }
 
 function isShareCode(input: string): boolean {
@@ -392,6 +392,7 @@ export default function Home() {
   const unifiedInputRef = useRef<HTMLTextAreaElement | null>(null);
   const searchMenuRef = useRef<HTMLDivElement | null>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const searchRequestRef = useRef(0);
   const blurTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const [selectedMods, setSelectedMods] = useState<Set<string>>(new Set());
   const [unifiedInput, setUnifiedInput] = useState("");
@@ -1248,6 +1249,57 @@ export default function Home() {
     }
   };
 
+  const runSearch = async (value: string, projectType: ProjectType) => {
+    const requestId = ++searchRequestRef.current;
+    setIsSearching(true);
+    try {
+      const response = await fetch(
+        `/api/modrinth?type=search&q=${encodeURIComponent(value)}&project_type=${encodeURIComponent(projectType)}`
+      );
+      if (requestId !== searchRequestRef.current) return;
+      if (response.ok) {
+        const data = (await response.json()) as SearchResult;
+        const hits = (data.hits || []).filter((hit) => hit.project_type === projectType);
+        setSearchResults(hits);
+        if (selectedResultId && hits.length) {
+          const index = hits.findIndex((hit) => hit.project_id === selectedResultId);
+          setSearchHighlightIndex(index >= 0 ? index : 0);
+        } else {
+          setSearchHighlightIndex(hits.length ? 0 : -1);
+        }
+      }
+    } catch {
+      if (requestId === searchRequestRef.current) {
+        setNotice("搜尋失敗，請稍後再試。");
+        setSearchHighlightIndex(-1);
+      }
+    } finally {
+      if (requestId === searchRequestRef.current) {
+        setIsSearching(false);
+      }
+    }
+  };
+
+  const handleCategoryChange = (projectType: ProjectType) => {
+    setCategory(projectType);
+    setSelectedResultId(null);
+    setSearchHighlightIndex(-1);
+    setSearchResults([]);
+    clearTimeout(searchTimeoutRef.current);
+    searchRequestRef.current += 1;
+
+    const value = unifiedInput.trim();
+    if (!value || isModrinthUrl(value) || value.includes("\n")) {
+      return;
+    }
+
+    setShowSearch(true);
+    setSearchQuery(value);
+    searchTimeoutRef.current = setTimeout(() => {
+      runSearch(value, projectType);
+    }, 150);
+  };
+
   const handleUnifiedInput = async (value: string) => {
     // 如果已選中模組，檢查是否開始新搜尋
     // 若輸入值不是從舊值開始的（例如全選後輸入新內容），則清空已選狀態
@@ -1264,6 +1316,7 @@ export default function Home() {
     clearTimeout(searchTimeoutRef.current);
 
     if (!value.trim()) {
+      searchRequestRef.current += 1;
       setSearchResults([]);
       setSearchQuery("");
       setSearchHighlightIndex(-1);
@@ -1273,6 +1326,7 @@ export default function Home() {
 
     // 如果是連結，直接新增
     if (isModrinthUrl(value)) {
+      searchRequestRef.current += 1;
       setSearchResults([]);
       setSearchQuery("");
       setSearchHighlightIndex(-1);
@@ -1285,28 +1339,7 @@ export default function Home() {
     setSearchHighlightIndex(-1);
     setSearchQuery(value);
     searchTimeoutRef.current = setTimeout(async () => {
-      setIsSearching(true);
-      try {
-        const response = await fetch(
-          `/api/modrinth?type=search&q=${encodeURIComponent(value)}${category ? `&project_type=${encodeURIComponent(category)}` : ""}`
-        );
-        if (response.ok) {
-          const data = (await response.json()) as SearchResult;
-          setSearchResults(data.hits || []);
-          // 優先高亮已選中的項目
-          if (selectedResultId && data.hits) {
-            const index = data.hits.findIndex(h => h.project_id === selectedResultId);
-            setSearchHighlightIndex(index >= 0 ? index : 0);
-          } else {
-            setSearchHighlightIndex(data.hits && data.hits.length ? 0 : -1);
-          }
-        }
-      } catch (error) {
-        setNotice("搜尋失敗，請稍後再試。");
-        setSearchHighlightIndex(-1);
-      } finally {
-        setIsSearching(false);
-      }
+      runSearch(value, category);
     }, 300);
   };
 
@@ -1743,7 +1776,7 @@ export default function Home() {
                     <button
                       key={option.value}
                       type="button"
-                      onClick={() => setCategory(option.value)}
+                      onClick={() => handleCategoryChange(option.value)}
                       title={option.description}
                       className={`min-h-11 rounded-xl border px-3 py-2 text-left transition ${
                         category === option.value
