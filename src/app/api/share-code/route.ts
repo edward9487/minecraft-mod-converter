@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { randomBytes, createHash } from "crypto";
-import { getDb, getShareCode, saveShareCode, findShareCodeByHash } from "@/lib/db";
+import { getShareCode, saveShareCode, findShareCodeByHash } from "@/lib/db";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,15 +19,18 @@ function computeHash(payload: { targetVersion: string; loader: string; items: un
   const normalized = JSON.stringify({
     targetVersion: payload.targetVersion,
     loader: payload.loader,
-    items: payload.items.map((item: any) => ({
-      id: item.id,
-      title: item.title,
-      isDependency: item.isDependency,
-      isSelected: item.isSelected,
-      note: item.note ?? "",
-      isCustom: Boolean(item.isCustom),
-      customUrl: item.customUrl ?? "",
-    })),
+    items: payload.items.map((item) => {
+      const entry = item && typeof item === "object" ? item as Record<string, unknown> : {};
+      return {
+        id: entry.id,
+        title: entry.title,
+        isDependency: entry.isDependency,
+        isSelected: entry.isSelected,
+        note: entry.note ?? "",
+        isCustom: Boolean(entry.isCustom),
+        customUrl: entry.customUrl ?? "",
+      };
+    }),
   });
   return createHash("sha256").update(normalized).digest("hex");
 }

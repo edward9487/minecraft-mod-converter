@@ -1,5 +1,6 @@
 "use client";
 
+import JSZip from "jszip";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 
@@ -47,6 +48,15 @@ type LoaderTag = {
   loader: string;
 };
 
+type ProjectType =
+  | "mod"
+  | "modpack"
+  | "resourcepack"
+  | "shader"
+  | "plugin"
+  | "datapack"
+  | "minecraft_java_server";
+
 type ProjectInfo = {
   id?: string;
   title?: string;
@@ -68,6 +78,7 @@ type SearchResult = {
     project_id: string;
     title: string;
     slug: string;
+    project_type: ProjectType;
     icon_url?: string;
   }>;
 };
@@ -75,6 +86,7 @@ type SearchResult = {
 const initialItems: CartItem[] = [];
 
 const fallbackVersions = [
+  "26.2",
   "26.1",
   "1.21.1",
   "1.21",
@@ -92,7 +104,7 @@ const fallbackVersions = [
 
 const fallbackLoaders = ["Fabric", "NeoForge", "Forge", "Quilt"];
 
-const latestOverrideVersion = "26.1";
+const latestOverrideVersion = "26.2";
 
 const loaderLabelMap: Record<string, string> = {
   fabric: "Fabric",
@@ -103,10 +115,34 @@ const loaderLabelMap: Record<string, string> = {
   asm: "Asm",
 };
 
+const projectTypeOptions: Array<{
+  value: ProjectType;
+  label: string;
+  description: string;
+}> = [
+  { value: "mod", label: "Mod 模組", description: "客戶端或伺服器功能模組" },
+  { value: "modpack", label: "Modpack 整合包", description: "整包環境與模組清單" },
+  { value: "resourcepack", label: "Resource Pack 資源包", description: "材質、語言與資源替換" },
+  { value: "shader", label: "Shader 光影", description: "光影與視覺渲染包" },
+  { value: "plugin", label: "Plugin 外掛", description: "伺服器外掛內容" },
+  { value: "datapack", label: "Data Pack 資料包", description: "資料包與遊戲規則內容" },
+  { value: "minecraft_java_server", label: "Java Server 伺服器", description: "Minecraft Java 伺服器軟體" },
+];
+
+const projectTypeLabelMap: Record<ProjectType, string> = {
+  mod: "Mod 模組",
+  modpack: "Modpack 整合包",
+  resourcepack: "Resource Pack 資源包",
+  shader: "Shader 光影",
+  plugin: "Plugin 外掛",
+  datapack: "Data Pack 資料包",
+  minecraft_java_server: "Java Server 伺服器",
+};
+
 function parseModrinthSlug(input: string) {
   const trimmed = input.trim();
   if (!trimmed) return "";
-  const match = trimmed.match(/modrinth\.com\/mod\/([\w-]+)/i);
+  const match = trimmed.match(/modrinth\.com\/(?:mod|modpack|resourcepack|shader|plugin|datapack|server)\/([\w-]+)/i);
   return match ? match[1] : trimmed;
 }
 
@@ -329,12 +365,16 @@ async function resolveDependencyTitles(
 
 export default function Home() {
   const [cartItems, setCartItems] = useState<CartItem[]>(initialItems);
-  const [targetVersion, setTargetVersion] = useState("1.21.1");
+  const [targetVersion, setTargetVersion] = useState(latestOverrideVersion);
   const [loader, setLoader] = useState("Fabric");
   const [inputUrl, setInputUrl] = useState("");
   const [notice, setNotice] = useState("");
   const [availableVersions, setAvailableVersions] = useState(fallbackVersions);
   const [availableLoaders, setAvailableLoaders] = useState(fallbackLoaders);
+  const [category, setCategory] = useState<ProjectType>("mod");
+  const [isZipping, setIsZipping] = useState(false);
+  const [zipProgress, setZipProgress] = useState(0);
+  const [zipUrl, setZipUrl] = useState<string | null>(null);
   const [isLoadingVersions, setIsLoadingVersions] = useState(false);
   const [isResolving, setIsResolving] = useState(false);
   const [isAdding, setIsAdding] = useState(false);
@@ -349,7 +389,7 @@ export default function Home() {
   const [versionCache, setVersionCache] = useState<Record<string, string>>({});
   const isTargetLockedRef = useRef(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const unifiedInputRef = useRef<HTMLInputElement | null>(null);
+  const unifiedInputRef = useRef<HTMLTextAreaElement | null>(null);
   const searchMenuRef = useRef<HTMLDivElement | null>(null);
   const searchTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
   const blurTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
@@ -366,6 +406,7 @@ export default function Home() {
   const [failedCandidates, setFailedCandidates] = useState<{original: string, slug: string}[]>([]);
   const [batchResults, setBatchResults] = useState<Map<string, "success" | "failed">>(new Map());
   const [showOnlyFailed, setShowOnlyFailed] = useState(false);
+  
 
   const statusStyles: Record<StatusTone, string> = {
     success: "bg-emerald-100 text-emerald-800 border-emerald-200",
@@ -779,7 +820,7 @@ export default function Home() {
 
   const resolveCandidate = async (candidate: {original: string, slug: string}): Promise<{candidate: {original: string, slug: string}, success: boolean, item?: CartItem}> => {
     try {
-      const response = await fetch(`/api/modrinth?type=search&q=${encodeURIComponent(candidate.slug)}&limit=1`);
+      const response = await fetch(`/api/modrinth?type=search&q=${encodeURIComponent(candidate.slug)}&limit=1${category ? `&project_type=${encodeURIComponent(category)}` : ""}`);
       if (!response.ok) throw new Error("搜尋失敗");
       
       const data = await response.json() as SearchResult;
@@ -913,6 +954,35 @@ export default function Home() {
       setIsResolving(false);
     }
   };
+
+    // 拖曳排序處理
+    const dragIndexRef = useRef<number | null>(null);
+
+    const handleDragStart = (event: React.DragEvent, index: number) => {
+      dragIndexRef.current = index;
+      event.dataTransfer.effectAllowed = "move";
+      try { event.dataTransfer.setData("text/plain", String(index)); } catch {}
+    };
+
+    const handleDragOverItem = (event: React.DragEvent, index: number) => {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+    };
+
+    const handleDropItem = (event: React.DragEvent, index: number) => {
+      event.preventDefault();
+      const from = dragIndexRef.current ?? Number(event.dataTransfer.getData("text/plain"));
+      const to = index;
+      if (from === null || isNaN(from)) return;
+      if (from === to) return;
+      setCartItems((items) => {
+        const next = [...items];
+        const [moved] = next.splice(from, 1);
+        next.splice(to, 0, moved);
+        return next;
+      });
+      dragIndexRef.current = null;
+    };
 
   const handleGenerateCode = async () => {
     if (!cartItems.length) {
@@ -1218,7 +1288,7 @@ export default function Home() {
       setIsSearching(true);
       try {
         const response = await fetch(
-          `/api/modrinth?type=search&q=${encodeURIComponent(value)}`
+          `/api/modrinth?type=search&q=${encodeURIComponent(value)}${category ? `&project_type=${encodeURIComponent(category)}` : ""}`
         );
         if (response.ok) {
           const data = (await response.json()) as SearchResult;
@@ -1391,32 +1461,89 @@ export default function Home() {
   };
 
   const handleDownloadSelected = () => {
-    const selected = cartItems.filter(
-      (item) => selectedMods.has(item.id)
-    );
-    if (!selected.length) {
-      setNotice("目前沒有已勾選的模組可下載。");
-      return;
-    }
+    (async () => {
+      const selected = cartItems.filter((item) => selectedMods.has(item.id));
+      if (!selected.length) {
+        setNotice("目前沒有已勾選的模組可下載。");
+        return;
+      }
 
-    const confirmed = typeof window !== "undefined" && window.confirm(`確認要下載 ${selected.length} 筆模組清單嗎？`);
-    if (!confirmed) return;
+      const confirmed = typeof window !== "undefined" && window.confirm(`確認要打包並下載 ${selected.length} 個項目嗎？`);
+      if (!confirmed) return;
 
-    const filenames = selected.map((item) => 
-      item.filename ?? `${item.title}(該版本缺失)`
-    );
-    const blob = new Blob([JSON.stringify(filenames, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `modlist-${targetVersion}-${toLoaderId(loader)}.json`;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    setNotice("已下載選中模組清單。");
+      setIsZipping(true);
+      setZipProgress(0);
+      setZipUrl(null);
+
+      try {
+        const zip = new JSZip();
+
+        const total = selected.length;
+        let processed = 0;
+
+        for (const item of selected) {
+          try {
+            const vResp = await fetch(
+              `/api/modrinth?type=versions&projectId=${encodeURIComponent(item.id)}&gameVersion=${encodeURIComponent(item.targetVersion)}&loader=${encodeURIComponent(loader)}`
+            );
+            let filesUrl: string | null = null;
+            let filename = `${item.title}.jar`;
+            if (vResp.ok) {
+              const versions = (await vResp.json()) as VersionInfo[];
+              const target = (versions && versions[0]) || null;
+              if (target && target.files && target.files.length) {
+                filesUrl = target.files[0].url;
+                filename = target.files[0].filename ?? filename;
+              }
+            }
+
+            if (!filesUrl && item.customUrl) {
+              filesUrl = item.customUrl;
+            }
+
+            if (!filesUrl) {
+              // 無法取得檔案，加入文字檔說明
+              zip.file(`${item.title}-NOTFOUND.txt`, `無法取得對應版本的下載連結：${item.id}`);
+            } else {
+              const fileResp = await fetch(filesUrl);
+              if (fileResp.ok) {
+                const blob = await fileResp.blob();
+                zip.file(filename, blob);
+              } else {
+                zip.file(`${item.title}-FAILED.txt`, `下載失敗：${filesUrl}`);
+              }
+            }
+          } catch {
+            zip.file(`${item.title}-ERROR.txt`, `處理時發生錯誤`);
+          }
+
+          processed++;
+          setZipProgress(Math.round((processed / total) * 50));
+        }
+
+        const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" }, (meta) => {
+          setZipProgress(50 + Math.round((meta.percent / 100) * 50));
+        });
+
+        const url = URL.createObjectURL(blob);
+        setZipUrl(url);
+        // 自動觸發下載
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `modlist-${targetVersion}-${toLoaderId(loader)}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+
+        setNotice("ZIP 打包完成，已開始下載。若未自動開始，請使用下方的下載按鈕。");
+      } catch (error) {
+        console.error("Zip error:", error);
+        setNotice("打包失敗，請稍後重試。");
+      } finally {
+        setIsZipping(false);
+        setZipProgress(100);
+      }
+    })();
   };
 
   const handleImportFile = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -1598,7 +1725,7 @@ export default function Home() {
       </header>
 
       <main className="mx-auto mt-14 max-w-6xl space-y-6 px-6">
-        <div className="grid gap-6 lg:grid-cols-[1.5fr_auto_0.8fr] rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember animate-fade-up">
+        <div className="relative z-40 grid gap-6 overflow-visible lg:grid-cols-[1.5fr_auto_0.8fr] rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember animate-fade-up">
           <div>
             <div className="flex flex-col gap-2 mb-6">
               <h2 className="text-xl font-semibold whitespace-nowrap">模組清單輸入</h2>
@@ -1609,12 +1736,35 @@ export default function Home() {
             <div className="flex flex-col gap-6">
               <div className="flex flex-col gap-3">
                 <label className="text-xs text-[color:var(--muted)]">
-                  搜尋或批次輸入（支持多行）
+                  類型：
                 </label>
-                <div className="relative z-20">
+                <div className="grid grid-cols-2 gap-2 mb-2 sm:grid-cols-4">
+                  {projectTypeOptions.map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => setCategory(option.value)}
+                      title={option.description}
+                      className={`min-h-11 rounded-xl border px-3 py-2 text-left transition ${
+                        category === option.value
+                          ? "border-orange-200 bg-amber-50 text-orange-800"
+                          : "border-[color:var(--line)] bg-white text-[color:var(--muted)] hover:border-orange-200 hover:text-orange-700"
+                      }`}
+                    >
+                      <span className="block text-sm font-semibold leading-tight">
+                        {option.label}
+                      </span>
+                      <span className="block text-[11px] leading-tight opacity-75">
+                        {option.description}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                <label className="text-xs text-[color:var(--muted)]">搜尋或批次輸入（支持多行）</label>
+                <div className="relative z-[100]">
                   <div className="flex gap-2">
                     <textarea
-                      ref={unifiedInputRef as any}
+                      ref={unifiedInputRef}
                       className="flex-1 min-h-[80px] max-h-[400px] rounded-2xl border border-[color:var(--line)] bg-white px-4 py-3 text-sm focus:border-[color:var(--accent)] focus:outline-none focus:ring-2 focus:ring-[color:var(--accent)]/20 resize-y"
                       placeholder="搜尋模組、貼上 modrinth 連結、輸入清單代碼或批次輸入（每行一個模組名稱）&#10;例如：sodium&#10;lithium&#10;iris"
                       value={unifiedInput}
@@ -1656,7 +1806,7 @@ export default function Home() {
                   {showSearch && unifiedInput.trim() && !isModrinthUrl(unifiedInput) && !unifiedInput.includes('\n') && (
                     <div
                       ref={searchMenuRef}
-                      className="absolute top-full left-0 right-0 mt-2 max-h-96 overflow-y-auto rounded-2xl border border-[color:var(--line)] bg-white shadow-2xl z-50"
+                      className="absolute top-full left-0 right-0 mt-2 max-h-96 overflow-y-auto rounded-2xl border border-[color:var(--line)] bg-white shadow-2xl z-[1000]"
                       onMouseDown={(e) => e.preventDefault()}
                     >
                       {isSearching && (
@@ -1697,7 +1847,7 @@ export default function Home() {
                             <div className="flex-1 min-w-0">
                               <p className="text-sm font-medium truncate">{result.title}</p>
                               <p className="text-xs text-[color:var(--muted)] truncate">
-                                {result.slug}
+                                {projectTypeLabelMap[result.project_type]} / {result.slug}
                               </p>
                             </div>
                           </div>
@@ -1846,7 +1996,7 @@ export default function Home() {
           </div>
         </div>
 
-        <div className="rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember animate-fade-up">
+        <div className="relative z-0 rounded-3xl border border-[color:var(--line)] bg-white/90 p-6 shadow-ember animate-fade-up">
             <div className="flex items-center justify-between">
               <div>
                 <h2 className="text-xl font-semibold whitespace-nowrap">
@@ -1873,12 +2023,30 @@ export default function Home() {
                   自訂模組
                 </button>
               </div>
+              {isZipping ? (
+                <div className="w-full mt-3">
+                  <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+                    <div className="h-2 bg-emerald-500" style={{ width: `${zipProgress}%` }} />
+                  </div>
+                  <p className="text-xs text-[color:var(--muted)] mt-1">打包進度：{zipProgress}%</p>
+                </div>
+              ) : zipUrl ? (
+                <div className="w-full mt-3 flex items-center gap-2">
+                  <a href={zipUrl} className="h-9 rounded-full px-3 bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold" download>
+                    下載 ZIP
+                  </a>
+                </div>
+              ) : null}
             </div>
 
             <div className="mt-5 grid gap-4">
-              {visibleItems.map((item) => (
+              {visibleItems.map((item, index) => (
                 <div
                   key={item.id}
+                  draggable
+                  onDragStart={(e) => handleDragStart(e, index)}
+                  onDragOver={(e) => handleDragOverItem(e, index)}
+                  onDrop={(e) => handleDropItem(e, index)}
                   className={`grid grid-cols-1 lg:grid-cols-[1fr_240px] gap-4 rounded-2xl border px-4 py-4 transition ${
                     item.isDependency
                       ? selectedMods.has(item.id)

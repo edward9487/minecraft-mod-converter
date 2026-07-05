@@ -2,15 +2,43 @@ import path from "path";
 import os from "os";
 import fs from "fs";
 
-let db: any = null;
+type KvStore = {
+  get(key: string): Promise<unknown>;
+  setex(key: string, seconds: number, value: string): Promise<unknown>;
+};
+
+type SqliteStatement = {
+  get(...values: unknown[]): unknown;
+  run(...values: unknown[]): { changes?: number };
+};
+
+type SqliteStore = {
+  prepare(sql: string): SqliteStatement;
+  pragma(sql: string): unknown;
+  exec(sql: string): unknown;
+};
+
+type DatabaseStore = KvStore | SqliteStore;
+
+type ShareCodeRow = {
+  id: string;
+  targetVersion: string;
+  loader: string;
+  items: string;
+  contentHash: string;
+  savedAt: string;
+  createdAt: string;
+};
+
+let db: DatabaseStore | null = null;
 
 function isVercelEnvironment(): boolean {
   return process.env.VERCEL === "1" || !!process.env.KV_REST_API_URL;
 }
 
-async function getKvDb(): Promise<any> {
+async function getKvDb(): Promise<KvStore> {
   const { kv } = await import("@vercel/kv");
-  return kv;
+  return kv as KvStore;
 }
 
 function getDbPath(): string {
@@ -50,7 +78,7 @@ function getDbPath(): string {
   return path.join(dataDir, "modlist-share-codes.db");
 }
 
-export async function getDb(): Promise<any> {
+export async function getDb(): Promise<DatabaseStore> {
   if (db) return db;
 
   if (isVercelEnvironment()) {
@@ -63,10 +91,11 @@ export async function getDb(): Promise<any> {
     console.log("Opening database at:", dbPath);
     
     try {
-      db = new Database(dbPath);
-      db.pragma("journal_mode = WAL");
+      const sqlite = new Database(dbPath) as SqliteStore;
+      db = sqlite;
+      sqlite.pragma("journal_mode = WAL");
 
-      db.exec(`
+      sqlite.exec(`
         CREATE TABLE IF NOT EXISTS share_codes (
           id TEXT PRIMARY KEY,
           targetVersion TEXT NOT NULL,
@@ -106,7 +135,8 @@ export async function getShareCode(code: string): Promise<StoredPayload | null> 
   if (isKv) {
     const key = `share_code:${code.toUpperCase()}`;
     try {
-      const data = await database.get(key);
+      const kv = database as KvStore;
+      const data = await kv.get(key);
       if (!data) return null;
       return JSON.parse(typeof data === "string" ? data : JSON.stringify(data));
     } catch (error) {
@@ -114,8 +144,9 @@ export async function getShareCode(code: string): Promise<StoredPayload | null> 
       return null;
     }
   } else {
-    const stmt = database.prepare("SELECT * FROM share_codes WHERE id = ?");
-    const row = stmt.get(code.toUpperCase()) as any;
+    const sqlite = database as SqliteStore;
+    const stmt = sqlite.prepare("SELECT * FROM share_codes WHERE id = ?");
+    const row = stmt.get(code.toUpperCase()) as ShareCodeRow | undefined;
     
     if (!row) return null;
     
@@ -140,19 +171,21 @@ export async function saveShareCode(
     const key = `share_code:${code.toUpperCase()}`;
     const ttl = 90 * 24 * 60 * 60;
     try {
-      await database.setex(key, ttl, JSON.stringify({
+      const kv = database as KvStore;
+      await kv.setex(key, ttl, JSON.stringify({
         ...payload,
         createdAt: new Date().toISOString(),
       }));
       
       const hashKey = `share_code_hash:${payload.contentHash}`;
-      await database.setex(hashKey, ttl, code.toUpperCase());
+      await kv.setex(hashKey, ttl, code.toUpperCase());
     } catch (error) {
       console.error("Failed to save share code to KV:", error);
       throw error;
     }
   } else {
-    const stmt = database.prepare(`
+    const sqlite = database as SqliteStore;
+    const stmt = sqlite.prepare(`
       INSERT OR REPLACE INTO share_codes 
       (id, targetVersion, loader, items, contentHash, savedAt, createdAt)
       VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -178,15 +211,17 @@ export async function findShareCodeByHash(contentHash: string): Promise<string |
   if (isKv) {
     const key = `share_code_hash:${contentHash}`;
     try {
-      const code = await database.get(key);
+      const kv = database as KvStore;
+      const code = await kv.get(key);
       return code ? String(code) : null;
     } catch (error) {
       console.error("Failed to find share code by hash:", error);
       return null;
     }
   } else {
-    const stmt = database.prepare("SELECT id FROM share_codes WHERE contentHash = ? LIMIT 1");
-    const row = stmt.get(contentHash) as any;
+    const sqlite = database as SqliteStore;
+    const stmt = sqlite.prepare("SELECT id FROM share_codes WHERE contentHash = ? LIMIT 1");
+    const row = stmt.get(contentHash) as Pick<ShareCodeRow, "id"> | undefined;
     return row ? row.id : null;
   }
 }
@@ -200,10 +235,11 @@ export async function deleteOldShareCodes(daysOld: number = 90): Promise<number>
     return 0;
   } else {
     const cutoffDate = new Date(Date.now() - daysOld * 24 * 60 * 60 * 1000).toISOString();
-    const stmt = database.prepare(
+    const sqlite = database as SqliteStore;
+    const stmt = sqlite.prepare(
       "DELETE FROM share_codes WHERE createdAt < ?"
     );
-    const info = stmt.run(cutoffDate) as any;
+    const info = stmt.run(cutoffDate);
     return info.changes || 0;
   }
 }

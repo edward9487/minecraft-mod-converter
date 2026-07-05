@@ -16,14 +16,15 @@ function generateCacheKey(
   query?: string,
   projectId?: string,
   gameVersion?: string,
-  loader?: string
+  loader?: string,
+  projectType?: string
 ): string {
   switch (type) {
     case "game_versions":
     case "loaders":
       return `${type}`;
     case "search":
-      return `search:${query}`;
+      return `search:${query}:${projectType || "all"}`;
     case "project":
       return `project:${projectId}`;
     case "versions":
@@ -87,12 +88,35 @@ function buildVersionsUrl(
   }`;
 }
 
-function buildSearchUrl(query: string, limit: number = 20) {
+function buildSearchUrl(query: string, limit: number = 20, projectType?: string | null) {
   const params = new URLSearchParams();
   params.set("query", query);
-  params.set("limit", limit.toString());
+  const upstreamLimit = projectType ? Math.max(limit, 100) : limit;
+  params.set("limit", upstreamLimit.toString());
   params.set("index", "relevance");
+  if (projectType) {
+    params.set("facets", JSON.stringify([[`project_type:${projectType}`]]));
+  }
   return `${BASE_URL}/search?${params.toString()}`;
+}
+
+function filterSearchProjectType(data: unknown, projectType: string | null, limit: number) {
+  if (!projectType || !data || typeof data !== "object") return data;
+  const searchData = data as {
+    hits?: Array<{ project_type?: string }>;
+    total_hits?: number;
+  };
+  if (!Array.isArray(searchData.hits)) return data;
+
+  const hits = searchData.hits
+    .filter((hit) => hit.project_type === projectType)
+    .slice(0, limit);
+
+  return {
+    ...searchData,
+    hits,
+    total_hits: hits.length,
+  };
 }
 
 export async function GET(request: NextRequest) {
@@ -102,9 +126,12 @@ export async function GET(request: NextRequest) {
   const gameVersion = searchParams.get("gameVersion");
   const loader = searchParams.get("loader");
   const q = searchParams.get("q");
+  const limit = Number(searchParams.get("limit") ?? "20");
+  // 支援 Modrinth project_type facet（eg. mod, shader, resourcepack）
+  const projectType = searchParams.get("project_type");
 
   // 生成缓存key
-  const cacheKey = generateCacheKey(type || "", q || "", projectId || "", gameVersion || "", loader || "");
+  const cacheKey = generateCacheKey(type || "", q || "", projectId || "", gameVersion || "", loader || "", projectType || "");
 
   // 对于版本标签，使用长期缓存
   const isLongCacheable = type === "game_versions" || type === "loaders";
@@ -130,7 +157,9 @@ export async function GET(request: NextRequest) {
   }
 
   if (type === "search") {
-    if (q) url = buildSearchUrl(q);
+    if (q) {
+      url = buildSearchUrl(q, Number.isFinite(limit) ? limit : 20, projectType);
+    }
   }
 
   if (type === "project") {
@@ -168,7 +197,11 @@ export async function GET(request: NextRequest) {
       next: { revalidate: 3600 },
     });
 
-    const data = await upstream.json();
+    const upstreamData = await upstream.json();
+    const data =
+      type === "search"
+        ? filterSearchProjectType(upstreamData, projectType, Number.isFinite(limit) ? limit : 20)
+        : upstreamData;
 
     // 缓存成功的数据
     if (upstream.ok) {
